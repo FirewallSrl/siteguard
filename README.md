@@ -1,36 +1,80 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SiteGuard
 
-## Getting Started
+Piattaforma agent per monitorare siti **WordPress / Joomla**: aggiornamenti, integrity file, segnali di compromissione. L’utente decide se far eseguire l’intervento all’AI o farlo manualmente.
 
-First, run the development server:
+Pensata per deploy su **Vercel** (UI + API) con job asincroni via **Inngest** e DB **Postgres** (Neon) in produzione.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Architettura
+
+```
+Vercel (Next.js)
+  ├── Dashboard / API
+  ├── Credenziali cifrate (AES-256-GCM)
+  └── Inngest webhook
+        └── Worker scan:
+              ├── API CMS (utenti, settings, plugin/update)
+              └── SFTP (malware su filesystem, cleanup)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Database
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Usa Postgres remoto (Firewall SRL) via `DATABASE_URL` (Prisma) e opzionalmente PostgREST:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `NEXT_PUBLIC_REST_URL` + `NEXT_PUBLIC_ANON_KEY` (client)
+- `SERVICE_ROLE_KEY` (solo server)
 
-## Learn More
+Tabelle: `sites`, `scans`, `findings`, `actions`, `audit_logs`.
 
-To learn more about Next.js, take a look at the following resources:
+## Quick start (locale)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+cp .env.example .env   # inserisci DATABASE_URL e chiavi REST
+npm install
+npx prisma db push
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Apri [http://localhost:3000](http://localhost:3000).
 
-## Deploy on Vercel
+Con `DEMO_SCAN=true` (default) puoi aggiungere un sito **senza** credenziali e avviare uno scan: vengono generati finding di esempio (update, malware, admin sospetto, siteurl hijack). Su ogni finding:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **Esegui con AI** — approva e simula l’applicazione
+- **Faccio io** — mostra la checklist
+- **Ignora**
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Credenziali reali
+
+Nel form “Nuovo sito”:
+
+| Canale | Uso |
+|--------|-----|
+| **API CMS** | Utenti admin, settings/siteurl, inventario plugin e update |
+| **SFTP** | Scan PHP in `uploads`, pattern malware, delete/quarantena file |
+
+Le secret sono cifrate con `CREDENTIALS_SECRET` prima di finire nel DB.
+
+Per scan live: `DEMO_SCAN=false` e almeno API o SFTP compilati.
+
+## Vercel
+
+1. Crea un DB Neon e imposta `DATABASE_URL` (postgres).
+2. In `prisma/schema.prisma` cambia `provider = "postgresql"`.
+3. `npx prisma db push` (o migrate).
+4. Variabili: `CREDENTIALS_SECRET`, `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY`, `DEMO_SCAN=false`.
+5. Collega Inngest all’app (`/api/inngest`).
+6. Deploy su Vercel.
+
+Senza Inngest lo scan gira in-process nella Route Handler (ok in locale; su Vercel preferisci Inngest per i timeout).
+
+## Roadmap
+
+- [ ] Handler live: update plugin WP via REST, delete file via SFTP
+- [ ] Backup automatico pre-write su R2/S3
+- [ ] Auth multi-tenant (Clerk)
+- [ ] Cron scan giornaliero Inngest
+- [ ] Feed CVE / WPScan
+- [ ] Allowlist IP worker SFTP
+
+## Stack
+
+Next.js 16 · Prisma · SQLite (dev) / Postgres (prod) · Inngest · ssh2-sftp-client · Zod

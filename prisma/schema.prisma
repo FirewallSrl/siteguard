@@ -1,0 +1,112 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Site {
+  id         String    @id @default(cuid())
+  name       String
+  url        String
+  /// wordpress | joomla
+  cms        String    @default("wordpress")
+  /// pending | connected | error
+  status     String    @default("pending")
+  /// Credenziali cifrate (JSON): { sftp?, api? }
+  secretsEnc String?   @map("secrets_enc")
+  /// Inventario ultimo scan (JSON): versione CMS, estensioni, temi, PHP, SSL…
+  inventoryJson String? @map("inventory_json")
+  lastScanAt DateTime? @map("last_scan_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  scans     Scan[]
+  findings  Finding[]
+  actions   Action[]
+  auditLogs AuditLog[]
+
+  @@map("sites")
+}
+
+model Scan {
+  id         String    @id @default(cuid())
+  siteId     String    @map("site_id")
+  /// queued | running | completed | failed
+  status     String    @default("queued")
+  summary    String?
+  error      String?
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  site     Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  findings Finding[]
+
+  @@index([siteId])
+  @@map("scans")
+}
+
+model Finding {
+  id           String   @id @default(cuid())
+  siteId       String   @map("site_id")
+  scanId       String?  @map("scan_id")
+  /// update_core | update_plugin | update_theme | malware | suspicious_user | settings_hijack | vulnerability | config
+  type         String
+  /// info | low | medium | high | critical
+  severity     String
+  title        String
+  description  String
+  evidence     String   @default("{}")
+  /// open | resolved | ignored
+  status       String   @default("open")
+  proposedPlan String?  @map("proposed_plan")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  site    Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  scan    Scan?    @relation(fields: [scanId], references: [id], onDelete: SetNull)
+  actions Action[]
+
+  @@index([siteId])
+  @@index([status])
+  @@map("findings")
+}
+
+model Action {
+  id         String    @id @default(cuid())
+  siteId     String    @map("site_id")
+  findingId  String?   @map("finding_id")
+  /// ai | manual
+  mode       String
+  /// proposed | approved | rejected | running | completed | failed
+  status     String    @default("proposed")
+  title      String
+  payload    String    @default("{}")
+  result     String?
+  error      String?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+  executedAt DateTime? @map("executed_at")
+
+  site    Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  finding Finding? @relation(fields: [findingId], references: [id], onDelete: SetNull)
+
+  @@index([siteId])
+  @@map("actions")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  siteId    String?  @map("site_id")
+  event     String
+  detail    String   @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  site Site? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+
+  @@index([siteId])
+  @@map("audit_logs")
+}
