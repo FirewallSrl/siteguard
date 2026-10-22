@@ -582,10 +582,13 @@ body:has([data-page="login"]) .mobile-top {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  min-width: 0;
+  width: 100%;
   background: var(--bg-elevated);
   border-radius: 14px;
   padding: 0.75rem 0.9rem;
   box-shadow: var(--shadow-sm);
+  box-sizing: border-box;
 }
 
 .hero-band {
@@ -610,8 +613,33 @@ body:has([data-page="login"]) .mobile-top {
   background: var(--bg-elevated);
   border: none;
   border-radius: 14px;
-  padding: 0.75rem 0.95rem;
+  padding: 0.85rem 1rem;
   box-shadow: var(--shadow-sm);
+  min-width: 0;
+}
+
+.stat-tile-label {
+  margin: 0;
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.stat-tile-value {
+  margin: 0.35rem 0 0;
+  font-family: var(--font-plex-sans), "IBM Plex Sans", sans-serif;
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  line-height: 1;
+}
+
+.stat-tile-value.is-danger {
+  color: var(--danger);
 }
 
 .stat-tile[data-tone="cyan"],
@@ -620,6 +648,166 @@ body:has([data-page="login"]) .mobile-top {
 .stat-tile[data-tone="emerald"] {
   background: var(--bg-elevated);
   border: none;
+}
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.dashboard-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 1.1rem 1.25rem;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow);
+}
+
+.dashboard-hero-copy {
+  min-width: 0;
+  flex: 1 1 14rem;
+}
+
+.dashboard-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.dashboard-title {
+  margin: 0.35rem 0 0;
+  font-family: var(--font-plex-sans), "IBM Plex Sans", sans-serif;
+  font-size: clamp(1.45rem, 2.4vw, 1.85rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: #fff;
+  line-height: 1.15;
+}
+
+.dashboard-sub {
+  margin: 0.35rem 0 0;
+  max-width: 32rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.dashboard-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.dashboard-sites-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+  padding: 0 0.15rem;
+}
+
+.dashboard-sites-head h2 {
+  margin: 0;
+  font-family: var(--font-plex-sans), "IBM Plex Sans", sans-serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.dashboard-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2.5rem 1.25rem;
+  text-align: center;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.dashboard-site-icon {
+  display: flex;
+  height: 2.5rem;
+  width: 2.5rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--bg-soft);
+}
+
+.dashboard-site-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.dashboard-site-name {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  color: var(--ink);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-site-url {
+  margin: 0.15rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-site-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.dashboard-site-when {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.dashboard-site-ok {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--teal);
+  color: var(--teal);
+}
+
+@media (max-width: 720px) {
+  .dashboard-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-site-when {
+    display: none;
+  }
 }
 
 .chip {
