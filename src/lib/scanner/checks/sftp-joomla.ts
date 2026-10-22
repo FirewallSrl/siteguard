@@ -1,7 +1,11 @@
 import type { RemoteFsClient } from "../../sftp/client";
 import type { ScanFinding } from "../types";
 import { isRiskyPath, scanTextContent } from "../malware-patterns";
-import { listRecursive, readTextFile } from "../../sftp/client";
+import {
+  listRecursive,
+  modifyTimeToIso,
+  readTextFile,
+} from "../../sftp/client";
 
 function planDelete(
   filePath: string,
@@ -12,6 +16,21 @@ function planDelete(
     steps: ["Backup forense", "Eliminare via SFTP", "Rescan"],
     risk,
     requiresBackup: true,
+  };
+}
+
+function fileEvidence(
+  filePath: string,
+  extra: Record<string, unknown> = {},
+  modifyTime?: number,
+): Record<string, unknown> {
+  const modifiedAt = modifyTimeToIso(modifyTime);
+  return {
+    filePath,
+    ...extra,
+    ...(modifiedAt
+      ? { modifiedAt, modifiedAtSource: "ftp_mtime" as const }
+      : {}),
   };
 }
 
@@ -39,14 +58,14 @@ export async function runJoomlaSftpChecks(
   ];
 
   for (const dir of scanDirs) {
-    let files: string[] = [];
+    let files: Awaited<ReturnType<typeof listRecursive>> = [];
     try {
       files = await listRecursive(client, dir, 600);
     } catch {
       continue;
     }
 
-    const phpFiles = files.filter((f) => /\.php$/i.test(f));
+    const phpFiles = files.filter((f) => /\.php$/i.test(f.path));
     const inMedia =
       /\/(images|media|tmp|cache)\//i.test(dir) &&
       !/administrator/i.test(dir);
@@ -58,7 +77,14 @@ export async function runJoomlaSftpChecks(
         title: `${phpFiles.length} file PHP in ${dir.split("/").slice(-2).join("/")}`,
         description:
           "In images/media/tmp non dovrebbero esserci PHP eseguibili (spesso backdoor).",
-        evidence: { sample: phpFiles.slice(0, 15), count: phpFiles.length, dir },
+        evidence: {
+          sample: phpFiles.slice(0, 15).map((f) => ({
+            path: f.path,
+            modifiedAt: modifyTimeToIso(f.modifyTime) ?? null,
+          })),
+          count: phpFiles.length,
+          dir,
+        },
         proposedPlan: {
           summary: "Rimuovere PHP da cartelle media dopo analisi",
           steps: [
@@ -74,22 +100,22 @@ export async function runJoomlaSftpChecks(
 
     for (const file of phpFiles.slice(0, 120)) {
       try {
-        const content = await readTextFile(client, file);
-        const hits = scanTextContent(content, file, {
-          riskyLocation: isRiskyPath(file) || inMedia,
+        const content = await readTextFile(client, file.path);
+        const hits = scanTextContent(content, file.path, {
+          riskyLocation: isRiskyPath(file.path) || inMedia,
         });
         for (const hit of hits.filter((h) => h.weight >= 5)) {
           findings.push({
             type: "malware",
             severity: hit.severity,
-            title: `File sospetto: ${file.split("/").pop()}`,
+            title: `File sospetto: ${file.path.split("/").pop()}`,
             description: hit.description,
-            evidence: {
-              filePath: file,
-              patternId: hit.patternId,
-              weight: hit.weight,
-            },
-            proposedPlan: planDelete(file, hit.severity),
+            evidence: fileEvidence(
+              file.path,
+              { patternId: hit.patternId, weight: hit.weight },
+              file.modifyTime,
+            ),
+            proposedPlan: planDelete(file.path, hit.severity),
           });
         }
       } catch {
@@ -118,11 +144,11 @@ export async function runJoomlaSftpChecks(
             severity: hit.severity,
             title: `PHP root sospetto: ${entry.name}`,
             description: hit.description,
-            evidence: {
-              filePath: full,
-              patternId: hit.patternId,
-              weight: hit.weight,
-            },
+            evidence: fileEvidence(
+              full,
+              { patternId: hit.patternId, weight: hit.weight },
+              entry.modifyTime,
+            ),
             proposedPlan: planDelete(full, hit.severity),
           });
         }
@@ -136,8 +162,15 @@ export async function runJoomlaSftpChecks(
 
   // .htaccess
   try {
-    const ht = await readTextFile(client, `${base}/.htaccess`);
-    const hits = scanTextContent(ht, `${base}/.htaccess`, {
+    const htPath = `${base}/.htaccess`;
+    const ht = await readTextFile(client, htPath);
+    let htMtime: number | undefined;
+    try {
+      htMtime = (await client.stat(htPath)).modifyTime;
+    } catch {
+      /* ignore */
+    }
+    const hits = scanTextContent(ht, htPath, {
       riskyLocation: true,
     });
     for (const hit of hits) {
@@ -146,7 +179,11 @@ export async function runJoomlaSftpChecks(
         severity: hit.severity,
         title: ".htaccess sospetto",
         description: hit.description,
-        evidence: { filePath: hit.filePath, patternId: hit.patternId },
+        evidence: fileEvidence(
+          hit.filePath,
+          { patternId: hit.patternId },
+          htMtime,
+        ),
         proposedPlan: planDelete(hit.filePath, hit.severity),
       });
     }

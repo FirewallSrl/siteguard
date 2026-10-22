@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { KeyRound, PlugZap, ShieldCheck } from "lucide-react";
+import { Check, Copy, KeyRound, PlugZap, ShieldCheck } from "lucide-react";
 import type { SecretsMeta } from "@/lib/secrets/safe";
 
 type TestResult = {
@@ -9,11 +9,23 @@ type TestResult = {
   api: { ok: boolean; latencyMs: number; message: string } | null;
 };
 
+type RevealedSftp = {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  protocol: "sftp" | "ftp" | "ftps";
+  rootPath: string;
+  hasPrivateKey: boolean;
+};
+
 export function CredentialsPanel({ siteId }: { siteId: string }) {
   const [meta, setMeta] = useState<SecretsMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<TestResult | null>(null);
@@ -36,6 +48,85 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
     void loadMeta();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [siteId]);
+
+  useEffect(() => {
+    if (!copied) return;
+    const t = window.setTimeout(() => setCopied(null), 1800);
+    return () => window.clearTimeout(t);
+  }, [copied]);
+
+  async function revealSftp(): Promise<RevealedSftp> {
+    const res = await fetch(`/api/sites/${siteId}/credentials/reveal`, {
+      method: "POST",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "Impossibile leggere gli accessi");
+    return data.sftp as RevealedSftp;
+  }
+
+  async function copyText(label: string, text: string) {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+    setMessage(`Copiato: ${label}`);
+  }
+
+  async function onCopyField(field: "host" | "username" | "password" | "port") {
+    setError(null);
+    setCopying(true);
+    try {
+      const sftp = await revealSftp();
+      const value =
+        field === "host"
+          ? sftp.host
+          : field === "username"
+            ? sftp.username
+            : field === "port"
+              ? String(sftp.port)
+              : sftp.password;
+      if (!value) {
+        throw new Error(
+          field === "password"
+            ? "Nessuna password salvata (accesso via chiave?)"
+            : "Valore vuoto",
+        );
+      }
+      await copyText(
+        field === "host"
+          ? "host"
+          : field === "username"
+            ? "utente"
+            : field === "port"
+              ? "porta"
+              : "password",
+        value,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Errore");
+    } finally {
+      setCopying(false);
+    }
+  }
+
+  async function onCopyAll() {
+    setError(null);
+    setCopying(true);
+    try {
+      const sftp = await revealSftp();
+      const lines = [
+        `Protocollo: ${sftp.protocol.toUpperCase()}`,
+        `Host: ${sftp.host}`,
+        `Porta: ${sftp.port}`,
+        `Utente: ${sftp.username}`,
+        `Password: ${sftp.password || "(nessuna — autenticazione a chiave)"}`,
+        `Root: ${sftp.rootPath}`,
+      ];
+      await copyText("accessi FTP", lines.join("\n"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Errore");
+    } finally {
+      setCopying(false);
+    }
+  }
 
   async function onSave(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -137,19 +228,36 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
             Accessi
           </h2>
           <p className="mt-1 text-sm text-[var(--muted)]">
-            Password e chiavi non vengono mai rimandate al browser. Lascia vuoto
-            un campo segreto per mantenerlo invariato.
+            Password e chiavi non vengono caricate nel form. Lascia vuoto un
+            campo segreto per mantenerlo invariato.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onTest}
-          disabled={testing || (!meta?.hasSftp && !meta?.hasApi)}
-          className="btn-ghost"
-        >
-          <PlugZap className="h-4 w-4" strokeWidth={1.75} />
-          {testing ? "Test in corso…" : "Testa la connessione"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          {meta?.hasSftp && (
+            <button
+              type="button"
+              onClick={() => void onCopyAll()}
+              disabled={copying}
+              className="btn-ghost"
+            >
+              {copied === "accessi FTP" ? (
+                <Check className="h-4 w-4 text-[var(--teal)]" strokeWidth={1.75} />
+              ) : (
+                <Copy className="h-4 w-4" strokeWidth={1.75} />
+              )}
+              {copying ? "Copio…" : "Copia accessi FTP"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onTest}
+            disabled={testing || (!meta?.hasSftp && !meta?.hasApi)}
+            className="btn-ghost"
+          >
+            <PlugZap className="h-4 w-4" strokeWidth={1.75} />
+            {testing ? "Test in corso…" : "Testa la connessione"}
+          </button>
+        </div>
       </div>
 
       <div className="panel flex gap-3 border-l-[3px] border-l-[var(--cyan)] p-4 text-sm text-[var(--muted)]">
@@ -161,27 +269,25 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
           <p className="font-medium text-[var(--ink)]">Tutela secret</p>
           <ul className="mt-1 list-disc space-y-0.5 pl-4">
             <li>Cifratura AES-256-GCM at rest (chiave solo server)</li>
-            <li>Trasporto HTTPS in produzione · password mai rimandate al browser</li>
-            <li>Audit log senza secret · errori sanificati</li>
+            <li>Trasporto HTTPS in produzione · form senza password salvate</li>
+            <li>Copia accessi on-demand (auditata) · errori sanificati</li>
           </ul>
         </div>
       </div>
 
       {test && (
         <div className="grid gap-2 sm:grid-cols-2">
-          {test.sftp && (
-            <TestCard label="SFTP" result={test.sftp} />
-          )}
+          {test.sftp && <TestCard label="SFTP" result={test.sftp} />}
           {test.api && <TestCard label="API CMS" result={test.api} />}
         </div>
       )}
 
       <form onSubmit={onSave} className="space-y-4" autoComplete="off">
         <div className="panel space-y-3 p-5">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <KeyRound className="h-4 w-4 text-[var(--muted)]" strokeWidth={1.75} />
             <h3 className="font-display text-base font-bold text-[var(--ink)]">
-              SFTP
+              SFTP / FTP
             </h3>
             {meta?.hasSftp && (
               <span className="font-mono text-[0.65rem] uppercase tracking-wide text-[var(--teal)]">
@@ -190,20 +296,38 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
             )}
           </div>
           {meta?.sftp && (
-            <p className="text-xs text-[var(--muted)]">
-              Rilevato:{" "}
-              <strong className="text-[var(--ink)]">
-                {meta.sftp.protocol.toUpperCase()}
-              </strong>
-              {" · porta "}
-              <strong className="text-[var(--ink)]">{meta.sftp.port}</strong>
-              {" · root "}
-              <strong className="text-[var(--ink)]">{meta.sftp.rootPath}</strong>
-            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+              <span>
+                Rilevato:{" "}
+                <strong className="text-[var(--ink)]">
+                  {meta.sftp.protocol.toUpperCase()}
+                </strong>
+                {" · porta "}
+                <strong className="text-[var(--ink)]">{meta.sftp.port}</strong>
+                {" · root "}
+                <strong className="text-[var(--ink)]">{meta.sftp.rootPath}</strong>
+              </span>
+              <CopyChip
+                label="porta"
+                active={copied === "porta"}
+                disabled={copying}
+                onClick={() => void onCopyField("port")}
+              />
+            </div>
           )}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-sm text-[var(--muted)] sm:col-span-2">
-              Host
+              <span className="mb-1 flex items-center justify-between gap-2">
+                Host
+                {meta?.hasSftp && (
+                  <CopyChip
+                    label="host"
+                    active={copied === "host"}
+                    disabled={copying}
+                    onClick={() => void onCopyField("host")}
+                  />
+                )}
+              </span>
               <input
                 name="sftpHost"
                 className="field"
@@ -212,7 +336,17 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
               />
             </label>
             <label className="block text-sm text-[var(--muted)]">
-              Username
+              <span className="mb-1 flex items-center justify-between gap-2">
+                Username
+                {meta?.hasSftp && (
+                  <CopyChip
+                    label="utente"
+                    active={copied === "utente"}
+                    disabled={copying}
+                    onClick={() => void onCopyField("username")}
+                  />
+                )}
+              </span>
               <input
                 name="sftpUser"
                 className="field"
@@ -221,7 +355,17 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
               />
             </label>
             <label className="block text-sm text-[var(--muted)]">
-              Password
+              <span className="mb-1 flex items-center justify-between gap-2">
+                Password
+                {meta?.hasSftp && meta.sftp?.auth === "password" && (
+                  <CopyChip
+                    label="password"
+                    active={copied === "password"}
+                    disabled={copying}
+                    onClick={() => void onCopyField("password")}
+                  />
+                )}
+              </span>
               <input
                 name="sftpPassword"
                 type="password"
@@ -298,6 +442,38 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
         </button>
       </form>
     </section>
+  );
+}
+
+function CopyChip({
+  label,
+  active,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        onClick();
+      }}
+      disabled={disabled}
+      className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--bg-soft)] px-2 py-0.5 font-mono text-[0.65rem] uppercase tracking-wide text-[var(--ink)] transition-colors hover:border-[var(--border-strong)] disabled:opacity-45"
+      title={`Copia ${label}`}
+    >
+      {active ? (
+        <Check className="h-3 w-3 text-[var(--teal)]" strokeWidth={2} />
+      ) : (
+        <Copy className="h-3 w-3" strokeWidth={2} />
+      )}
+      {active ? "ok" : "copia"}
+    </button>
   );
 }
 

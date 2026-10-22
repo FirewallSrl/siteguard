@@ -57,6 +57,7 @@ const PRIMARY_STEPS: Array<{
 
 export function SiteWorkspace({
   siteId,
+  siteUrl,
   findingsSlot,
   scans,
   actions,
@@ -67,6 +68,7 @@ export function SiteWorkspace({
   defaultTab = "accessi",
 }: {
   siteId: string;
+  siteUrl?: string;
   findingsSlot: ReactNode;
   scans: Scan[];
   actions: Action[];
@@ -249,6 +251,7 @@ export function SiteWorkspace({
         {tab === "panoramica" && (
           <SiteInventoryView
             inventoryJson={inventoryJson}
+            siteUrl={siteUrl}
             findingsCount={findingsCount}
             onOpenRemediation={() => openTab("finding")}
           />

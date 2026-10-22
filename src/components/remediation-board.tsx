@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  CalendarClock,
   ChevronDown,
   ShieldAlert,
   Cpu,
@@ -12,6 +13,8 @@ import {
   Inbox,
   CheckCircle2,
 } from "lucide-react";
+import { format, formatDistanceToNow } from "date-fns";
+import { it } from "date-fns/locale";
 import { SeverityBadge } from "@/components/severity-badge";
 import { FindingActions } from "@/components/finding-actions";
 import {
@@ -29,6 +32,7 @@ export type RemediationFinding = {
   description: string;
   evidence: string | null;
   proposedPlan: string | null;
+  createdAt?: string;
 };
 
 const ICONS: Record<RemediationGroupId, typeof ShieldAlert> = {
@@ -65,9 +69,37 @@ function parseBrokenItems(f: RemediationFinding): BrokenItem[] {
   }
 }
 
+function parseMalwareEvidence(f: RemediationFinding): {
+  filePath?: string;
+  modifiedAt?: string;
+} {
+  if (f.type !== "malware" || !f.evidence) return {};
+  try {
+    const evidence = JSON.parse(f.evidence) as {
+      filePath?: string;
+      modifiedAt?: string;
+    };
+    return {
+      filePath: evidence.filePath,
+      modifiedAt:
+        typeof evidence.modifiedAt === "string" ? evidence.modifiedAt : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function formatFileDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return format(d, "d MMMM yyyy, HH:mm", { locale: it });
+}
+
 export function RemediationBoard({
+  siteId,
   findings,
 }: {
+  siteId?: string;
   findings: RemediationFinding[];
 }) {
   const grouped = useMemo(() => {
@@ -244,6 +276,7 @@ export function RemediationBoard({
                   {items.map((f) => {
                     const plan = parsePlan(f.proposedPlan);
                     const brokenItems = parseBrokenItems(f);
+                    const malwareEv = parseMalwareEvidence(f);
                     return (
                       <article key={f.id} className="finding-card !shadow-none">
                         <div className="flex flex-wrap items-center gap-2">
@@ -256,6 +289,14 @@ export function RemediationBoard({
                         <p className="mt-1 break-words text-sm leading-relaxed text-[var(--muted)]">
                           {f.description}
                         </p>
+                        {(malwareEv.filePath || f.type === "malware") && (
+                          <CompromiseDate
+                            siteId={siteId}
+                            filePath={malwareEv.filePath}
+                            modifiedAt={malwareEv.modifiedAt}
+                            detectedAt={f.createdAt}
+                          />
+                        )}
                         {brokenItems.length > 0 && (
                           <ul className="mt-3 space-y-1.5 rounded-[var(--radius-sm)] bg-[var(--bg-soft)] p-3 font-mono text-xs">
                             {brokenItems.map((item) => (
@@ -292,5 +333,110 @@ export function RemediationBoard({
         })}
       </div>
     </section>
+  );
+}
+
+function CompromiseDate({
+  siteId,
+  filePath,
+  modifiedAt,
+  detectedAt,
+}: {
+  siteId?: string;
+  filePath?: string;
+  modifiedAt?: string;
+  detectedAt?: string;
+}) {
+  const [liveAt, setLiveAt] = useState<string | null>(modifiedAt ?? null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (modifiedAt || !siteId || !filePath) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void (async () => {
+      try {
+        const res = await fetch(`/api/sites/${siteId}/file-meta`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: filePath }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            typeof data.error === "string" ? data.error : "Meta non disponibile",
+          );
+        }
+        if (!cancelled) {
+          setLiveAt(
+            typeof data.modifiedAt === "string" ? data.modifiedAt : null,
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Errore");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [modifiedAt, siteId, filePath]);
+
+  const when = liveAt ?? modifiedAt;
+
+  return (
+    <div className="mt-3 rounded-[var(--radius-sm)] bg-[var(--bg-soft)] px-3 py-2.5 text-sm">
+      <div className="flex items-start gap-2">
+        <CalendarClock
+          className="mt-0.5 h-4 w-4 shrink-0 text-[var(--sand-ink)]"
+          strokeWidth={1.75}
+        />
+        <div className="min-w-0 space-y-1">
+          {when ? (
+            <p className="text-[var(--ink)]">
+              <span className="font-semibold">Possibile data compromissione</span>
+              {": "}
+              {formatFileDate(when)}
+              <span className="text-[var(--muted)]">
+                {" "}
+                (
+                {formatDistanceToNow(new Date(when), {
+                  addSuffix: true,
+                  locale: it,
+                })}
+                )
+              </span>
+            </p>
+          ) : loading ? (
+            <p className="text-[var(--muted)]">
+              Leggo data modifica dal server…
+            </p>
+          ) : error ? (
+            <p className="text-[var(--muted)]">
+              Data file non disponibile ({error}). Rifai uno scan integrity.
+            </p>
+          ) : (
+            <p className="text-[var(--muted)]">
+              Data modifica file non ancora nota — rifai uno scan integrity.
+            </p>
+          )}
+          <p className="text-xs text-[var(--muted)]">
+            Basata sull&apos;mtime FTP/SFTP (ultima scrittura sul server). Non è
+            una prova assoluta della prima intrusione.
+            {detectedAt && (
+              <>
+                {" "}
+                Rilevato da SiteGuard il {formatFileDate(detectedAt)}.
+              </>
+            )}
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }

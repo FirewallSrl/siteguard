@@ -41,6 +41,19 @@ export async function GET(_req: Request, { params }: Params) {
 
 export async function DELETE(_req: Request, { params }: Params) {
   const { id } = await params;
+  const site = await prisma.site.findUnique({ where: { id } });
+  if (!site) {
+    return NextResponse.json({ error: "Sito non trovato" }, { status: 404 });
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      siteId: id,
+      event: "site.deleted",
+      detail: JSON.stringify({ name: site.name, url: site.url }),
+    },
+  });
   await prisma.site.delete({ where: { id } });
+
   return NextResponse.json({ ok: true });
 }

@@ -15,14 +15,15 @@ export const FTP_PORT_CANDIDATES = [
 ] as const;
 
 export const ROOT_CANDIDATES = [
+  ".",
   "httpdocs",
   "public_html",
   "www",
   "web",
   "htdocs",
+  "public",
   "httpdocs/public",
   "domains",
-  ".",
 ] as const;
 
 export type DiscoveredCms = CmsType | "unknown";
@@ -247,8 +248,9 @@ async function probeRoots(
 
   if (best) return { ...best, homeListing };
 
+  // Preferisci "." (spesso = httpdocs in chroot FTP) invece di "httpdocs" vuoto
   return {
-    rootPath: fallback ?? preferredRoot?.replace(/\/+$/, "") ?? "httpdocs",
+    rootPath: fallback ?? (preferredRoot?.replace(/\/+$/, "") || "."),
     cms: "unknown",
     score: 0,
     homeListing,

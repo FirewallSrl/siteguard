@@ -57,11 +57,16 @@ function parseInventory(raw: string | null) {
       brokenLinks?: { brokenCount?: number };
     };
     const sslDays = inv.ssl?.daysLeft ?? null;
+    // Assenza di check SSL ≠ "No HTTPS" (falso positivo dopo scan senza scope SSL)
+    const sslOk =
+      inv.ssl == null
+        ? true
+        : Boolean(inv.ssl.https) && (sslDays == null || sslDays > 14);
     return {
       phpVersion: inv.phpVersion ?? null,
       phpVulnerable: (inv.phpAdvisories?.length ?? 0) > 0,
       sslDays,
-      sslOk: Boolean(inv.ssl?.https) && (sslDays == null || sslDays > 14),
+      sslOk,
       brokenLinks: inv.brokenLinks?.brokenCount ?? null,
     };
   } catch {

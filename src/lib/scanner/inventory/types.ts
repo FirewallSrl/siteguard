@@ -61,3 +61,35 @@ export type SiteInventory = {
   /** Docroot CMS effettivamente usata (può differire da rootPath salvata) */
   fsRoot?: string;
 };
+
+/** Evita note duplicate tra scan parziali (stesso testo o stessa categoria). */
+export function dedupeInventoryNotes(notes: string[]): string[] {
+  const categoryOf = (n: string): string | null => {
+    if (/^Root Joomla /i.test(n)) return "joomla-root";
+    if (/^RootPath salvata/i.test(n)) return "rootpath";
+    if (/^PHP[: ]/i.test(n)) return "php";
+    if (/^Versione Joomla /i.test(n)) return "joomla-version";
+    if (/^Retry inventario/i.test(n)) return "retry-root";
+    if (/^Nessuna estensione/i.test(n)) return "no-ext";
+    if (/link|url rotto|Anti-hack|hack score/i.test(n)) return "links-hack";
+    return null;
+  };
+
+  const seenExact = new Set<string>();
+  const seenCat = new Set<string>();
+  const out: string[] = [];
+
+  for (let i = notes.length - 1; i >= 0; i--) {
+    const n = notes[i]?.trim();
+    if (!n || seenExact.has(n)) continue;
+    const cat = categoryOf(n);
+    if (cat) {
+      if (seenCat.has(cat)) continue;
+      seenCat.add(cat);
+    }
+    seenExact.add(n);
+    out.push(n);
+  }
+
+  return out.reverse();
+}

@@ -8,6 +8,8 @@ export type SslCheckResult = {
     validTo?: string;
     daysLeft?: number;
     subject?: string;
+    /** URL salvato era http ma la porta 443 risponde */
+    urlWasHttp?: boolean;
   };
 };
 
@@ -16,31 +18,19 @@ export async function checkSsl(siteUrl: string): Promise<SslCheckResult> {
 
   let host: string;
   let port = 443;
+  let urlWasHttp = false;
 
   try {
     const u = new URL(siteUrl);
-    if (u.protocol !== "https:") {
-      findings.push({
-        type: "config",
-        severity: "high",
-        title: "Sito non in HTTPS",
-        description: "L'URL del sito non usa HTTPS. Traffico e cookie a rischio.",
-        evidence: { url: siteUrl },
-        proposedPlan: {
-          summary: "Abilitare HTTPS e forzare redirect",
-          steps: [
-            "Installare certificato (Let's Encrypt / hosting)",
-            "Forzare HTTPS in CMS e server",
-            "Verificare mixed content",
-          ],
-          risk: "high",
-          requiresBackup: false,
-        },
-      });
+    host = u.hostname;
+    if (u.protocol === "http:") {
+      urlWasHttp = true;
+      port = 443; // probe sempre TLS, anche se l'URL salvato è http
+    } else if (u.protocol === "https:") {
+      port = u.port ? Number(u.port) || 443 : 443;
+    } else {
       return { findings, ssl: { https: false } };
     }
-    host = u.hostname;
-    port = u.port ? Number(u.port) : 443;
   } catch {
     return { findings, ssl: { https: false } };
   }
@@ -56,7 +46,29 @@ export async function checkSsl(siteUrl: string): Promise<SslCheckResult> {
       validTo,
       daysLeft,
       subject: cert.subject,
+      urlWasHttp,
     };
+
+    if (urlWasHttp) {
+      findings.push({
+        type: "config",
+        severity: "medium",
+        title: "URL salvato in HTTP ma certificato presente",
+        description:
+          "Il sito risponde in HTTPS (certificato valido). Aggiorna l'URL del sito a https:// e forza il redirect HTTP→HTTPS.",
+        evidence: { url: siteUrl, host, validTo, daysLeft },
+        proposedPlan: {
+          summary: "Usare https:// come URL canonico e forzare redirect",
+          steps: [
+            "Aggiornare URL sito in SiteGuard a https://",
+            "Forzare HTTPS in CMS e server",
+            "Verificare mixed content",
+          ],
+          risk: "medium",
+          requiresBackup: false,
+        },
+      });
+    }
 
     if (daysLeft < 0) {
       findings.push({
@@ -104,6 +116,28 @@ export async function checkSsl(siteUrl: string): Promise<SslCheckResult> {
 
     return { findings, ssl };
   } catch (err) {
+    if (urlWasHttp) {
+      findings.push({
+        type: "config",
+        severity: "high",
+        title: "Sito non in HTTPS",
+        description:
+          "L'URL è in HTTP e non risulta un certificato raggiungibile sulla porta 443.",
+        evidence: { url: siteUrl, host },
+        proposedPlan: {
+          summary: "Abilitare HTTPS e forzare redirect",
+          steps: [
+            "Installare certificato (Let's Encrypt / hosting)",
+            "Forzare HTTPS in CMS e server",
+            "Verificare mixed content",
+          ],
+          risk: "high",
+          requiresBackup: false,
+        },
+      });
+      return { findings, ssl: { https: false, urlWasHttp } };
+    }
+
     findings.push({
       type: "config",
       severity: "medium",
@@ -117,6 +151,7 @@ export async function checkSsl(siteUrl: string): Promise<SslCheckResult> {
         requiresBackup: false,
       },
     });
+    // URL già https: non marchiare come "No HTTPS" solo per un errore di probe
     return { findings, ssl: { https: true } };
   }
 }

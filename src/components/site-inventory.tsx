@@ -19,10 +19,12 @@ import type {
 
 export function SiteInventoryView({
   inventoryJson,
+  siteUrl,
   findingsCount = 0,
   onOpenRemediation,
 }: {
   inventoryJson: string | null;
+  siteUrl?: string;
   findingsCount?: number;
   onOpenRemediation?: () => void;
 }) {
@@ -46,15 +48,24 @@ export function SiteInventoryView({
     );
   }
 
-  return <InventoryDashboard inv={inv} findingsCount={findingsCount} onOpenRemediation={onOpenRemediation} />;
+  return (
+    <InventoryDashboard
+      inv={inv}
+      siteUrl={siteUrl}
+      findingsCount={findingsCount}
+      onOpenRemediation={onOpenRemediation}
+    />
+  );
 }
 
 function InventoryDashboard({
   inv,
+  siteUrl,
   findingsCount,
   onOpenRemediation,
 }: {
   inv: SiteInventory;
+  siteUrl?: string;
   findingsCount: number;
   onOpenRemediation?: () => void;
 }) {
@@ -68,26 +79,53 @@ function InventoryDashboard({
   );
   const linkNote = inv.notes?.find((n) => /link|url/i.test(n));
   const broken = inv.brokenLinks;
-  const otherNotes =
-    inv.notes?.filter(
-      (n) =>
-        n !== coreFailNote &&
-        n !== linkNote &&
-        !/core .*aggiornato/i.test(n) &&
-        !/core joomla|core wordpress/i.test(n),
-    ) ?? [];
+  const otherNotes = useMemo(() => {
+    const filtered =
+      inv.notes?.filter(
+        (n) =>
+          n !== coreFailNote &&
+          n !== linkNote &&
+          !/core .*aggiornato/i.test(n) &&
+          !/core joomla|core wordpress/i.test(n),
+      ) ?? [];
+    // Dedup visuale (scan parziali potevano accumulare la stessa riga)
+    const seen = new Set<string>();
+    const catSeen = new Set<string>();
+    const out: string[] = [];
+    for (const n of filtered) {
+      if (seen.has(n)) continue;
+      const cat = /^Root Joomla /i.test(n)
+        ? "joomla-root"
+        : /^PHP[: ]/i.test(n)
+          ? "php"
+          : null;
+      if (cat && catSeen.has(cat)) continue;
+      seen.add(n);
+      if (cat) catSeen.add(cat);
+      out.push(n);
+    }
+    return out;
+  }, [inv.notes, coreFailNote, linkNote]);
 
-  const sslOk = inv.ssl?.https && (inv.ssl.daysLeft == null || inv.ssl.daysLeft > 14);
+  const urlLooksHttps = Boolean(siteUrl?.startsWith("https:"));
+  const sslChecked = inv.ssl != null;
+  const sslOk =
+    (inv.ssl?.https === true || (!sslChecked && urlLooksHttps)) &&
+    (inv.ssl?.daysLeft == null || inv.ssl.daysLeft > 14);
   const sslExpiry = formatSslExpiry(inv.ssl?.validTo);
-  const sslLabel = !inv.ssl?.https
-    ? "No HTTPS"
-    : sslExpiry
-      ? inv.ssl.daysLeft != null
-        ? `scade ${sslExpiry} · ${inv.ssl.daysLeft}g`
-        : `scade ${sslExpiry}`
-      : inv.ssl.daysLeft != null
-        ? `${inv.ssl.daysLeft}g SSL`
-        : "HTTPS ok";
+  const sslLabel = !sslChecked
+    ? urlLooksHttps
+      ? "HTTPS"
+      : "SSL n/d"
+    : inv.ssl!.https === false
+      ? "No HTTPS"
+      : sslExpiry
+        ? inv.ssl!.daysLeft != null
+          ? `scade ${sslExpiry} · ${inv.ssl!.daysLeft}g`
+          : `scade ${sslExpiry}`
+        : inv.ssl!.daysLeft != null
+          ? `${inv.ssl!.daysLeft}g SSL`
+          : "HTTPS ok";
 
   type Issue = {
     id: string;
@@ -131,7 +169,7 @@ function InventoryDashboard({
     });
   }
 
-  if (!sslOk && inv.ssl) {
+  if (!sslOk && sslChecked) {
     issues.push({
       id: "ssl",
       tone: "warn",

@@ -87,7 +87,13 @@ async function collectFromSftp(
       `Root Joomla riposizionata: ${start} → ${found.root} (score ${found.score})`,
     );
   } else if (found) {
-    inv.notes?.push(`Root Joomla confermata: ${found.root} (score ${found.score})`);
+    const chrootHint =
+      found.root === "."
+        ? " · home FTP = docroot (httpdocs chroot)"
+        : "";
+    inv.notes?.push(
+      `Root Joomla confermata: ${found.root} (score ${found.score})${chrootHint}`,
+    );
   } else {
     inv.notes?.push(
       `Root Joomla non confermata da ${start} — uso path corrente e percorsi alternativi`,

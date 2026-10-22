@@ -47,7 +47,12 @@ class FtpRemoteClient implements RemoteFsClient {
       ) {
         type = "d";
       }
-      return { name: f.name, type, size: f.size };
+      return {
+        name: f.name,
+        type,
+        size: f.size,
+        modifyTime: f.modifiedAt ? f.modifiedAt.getTime() : undefined,
+      };
     });
   }
 
@@ -69,7 +74,11 @@ class FtpRemoteClient implements RemoteFsClient {
     await this.client.uploadFrom(readable, this.norm(path));
   }
 
-  async stat(path: string): Promise<{ size: number; isDirectory: boolean }> {
+  async stat(path: string): Promise<{
+    size: number;
+    isDirectory: boolean;
+    modifyTime?: number;
+  }> {
     const normalized = this.norm(path);
     const base = normalized.includes("/")
       ? normalized.slice(0, normalized.lastIndexOf("/"))
@@ -83,6 +92,7 @@ class FtpRemoteClient implements RemoteFsClient {
     return {
       size: hit.size ?? 0,
       isDirectory: hit.type === "d",
+      modifyTime: hit.modifyTime,
     };
   }
 

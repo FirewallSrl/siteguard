@@ -204,33 +204,52 @@ function joinRoot(root: string, rel: string): string {
   return `${base}/${leaf}`;
 }
 
-/** Hint da filesystem (composer, .php-version, lock, hosting). */
+/** Hint da filesystem (composer, .php-version, lock, CloudLinux selector). */
 export async function detectPhpFromSftp(
   readText: (path: string) => Promise<string>,
   root: string,
+  opts?: { listDir?: (path: string) => Promise<string[]> },
 ): Promise<PhpVersionHit | null> {
-  const bases = uniqueStrings([
-    root.replace(/\/$/, "") || ".",
-    joinRoot(root, "httpdocs"),
-    joinRoot(root, "public_html"),
-    joinRoot(root, "www"),
-    joinRoot(root, "web"),
-    joinRoot(root, "public"),
-  ]);
+  const rootNorm = root.replace(/\/$/, "") || ".";
+  // Evitare ".." e sotto-docroot fantasma: su chroot FTP spezzano spesso la sessione.
+  const bases = uniqueStrings([rootNorm]);
+
+  // Scansiona .cl.selector nella sola root corrente
+  if (opts?.listDir) {
+    try {
+      const sel = joinRoot(rootNorm, ".cl.selector");
+      const names = await opts.listDir(sel);
+      for (const name of names.slice(0, 40)) {
+        if (!/\.(cfg|json|conf|ini|txt)$/i.test(name) && name !== "defaults.cfg") {
+          continue;
+        }
+        try {
+          const text = await readText(joinRoot(sel, name));
+          const v = parseSelectorPhpVersion(text);
+          if (v) return { version: v, source: "sftp" };
+        } catch {
+          /* next file */
+        }
+      }
+    } catch {
+      /* no selector */
+    }
+  }
 
   const relFiles: Array<{
     rel: string;
-    kind: "version-file" | "composer" | "lock" | "ini";
+    kind: "version-file" | "composer" | "lock" | "ini" | "selector";
   }> = [
+    { rel: ".cl.selector/defaults.cfg", kind: "selector" },
+    { rel: ".cl.selector/defaults.cfg.json", kind: "selector" },
+    { rel: ".cl.selector/config.json", kind: "selector" },
+    { rel: ".cl.selector/php.conf", kind: "selector" },
     { rel: ".php-version", kind: "version-file" },
     { rel: ".phpenv/version", kind: "version-file" },
     { rel: "composer.json", kind: "composer" },
     { rel: "composer.lock", kind: "lock" },
     { rel: ".user.ini", kind: "ini" },
     { rel: "php.ini", kind: "ini" },
-    { rel: "../.php-version", kind: "version-file" },
-    { rel: "../composer.json", kind: "composer" },
-    { rel: "../composer.lock", kind: "lock" },
   ];
 
   for (const base of bases) {
@@ -241,8 +260,11 @@ export async function detectPhpFromSftp(
           const v = parsePhpVersion(text);
           if (v) return { version: v, source: "sftp" };
         }
+        if (item.kind === "selector") {
+          const v = parseSelectorPhpVersion(text);
+          if (v) return { version: v, source: "sftp" };
+        }
         if (item.kind === "ini") {
-          // raramente contiene la versione, ma alcuni hosting annotano
           const v =
             text.match(/^\s*;\s*PHP\s+(\d+\.\d+(?:\.\d+)?)/im)?.[1] ??
             text.match(/php[_-]?version\s*=\s*["']?(\d+\.\d+(?:\.\d+)?)/i)?.[1];
@@ -283,67 +305,94 @@ export async function detectPhpFromSftp(
   return null;
 }
 
+/** CloudLinux selector / alt config (cfg, json, ini-like). */
+function parseSelectorPhpVersion(text: string): string | null {
+  // "php = native" non è una versione — serve probe runtime
+  if (/php\s*=\s*native\b/i.test(text) && !/\d+\.\d+/.test(text)) {
+    return null;
+  }
+  const patterns = [
+    /(?:^|[\s;[])(?:php[_-]?version|version|selected|interpreter|php)\s*[=:]\s*["']?(\d+\.\d+(?:\.\d+)?)/im,
+    /ea-php(\d)(\d)/i, // ea-php81 → 8.1
+    /alt-php(\d)(\d)/i,
+    /"php"\s*:\s*"(\d+\.\d+(?:\.\d+)?)"/i,
+    /php[_-]?(\d)\.(\d+)/i,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (!m) continue;
+    if (m[1] && m[2] && !m[1].includes(".")) {
+      return `${m[1]}.${m[2]}`;
+    }
+    if (m[1] && /^\d+\.\d+/.test(m[1])) return m[1];
+  }
+  const loose = text.match(/\b([78]\.\d(?:\.\d+)?)\b/);
+  return loose?.[1] ?? null;
+}
+
 /**
- * Probe sicuro: scrive un PHP monouso in più path web-accessibili,
+ * Probe sicuro: scrive un PHP monouso in cartelle web-accessibili,
  * lo richiama in HTTP, legge PHP_VERSION e cancella subito.
- * Evita file "dot" (spesso bloccati da Apache/nginx).
+ *
+ * Importante: NON scrivere prima sulla docroot (""): su FTP passivo
+ * un put fallito in root può chiudere il data-socket e invalidare
+ * tutta la sessione. Preferire tmp/cache/media.
  */
 export async function detectPhpViaRemoteProbe(input: {
   siteUrl: string;
   root: string;
   put: (path: string, data: string) => Promise<void>;
   del: (path: string) => Promise<void>;
-  /** Opzionale: verifica se una cartella è listabile prima del put */
   canList?: (path: string) => Promise<boolean>;
+  /** Se true, tenta anche la docroot per ultima (può far cadere FTP). */
+  tryDocroot?: boolean;
 }): Promise<PhpVersionHit | null> {
   const token = `sg${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  // Niente leading dot: molti hosting bloccano .*.php
   const fileName = `sg-php-${token}.php`;
   const marker = `SGPHP|${token}|`;
   const body =
     "<?php header('Content-Type: text/plain; charset=utf-8');" +
     "header('X-Robots-Tag: noindex, nofollow');" +
     "header('Cache-Control: no-store');" +
+    "header('X-SG-PHP: '.PHP_VERSION);" +
     `echo '${marker}'.PHP_VERSION;`;
 
   const root = input.root.replace(/\/$/, "") || ".";
   const siteBase = input.siteUrl.replace(/\/$/, "");
 
-  // Cartelle tipiche Joomla/WP/hosting dove l'esecuzione PHP è spesso consentita
+  // Ordine: cartelle dove l'upload FTP + esecuzione PHP funzionano più spesso
   const dirCandidates = uniqueStrings([
-    "",
     "tmp",
-    "images",
-    "media",
     "cache",
-    "httpdocs",
-    "public_html",
-    "www",
-    "web",
-    "public",
+    "media",
+    "images",
+    "tmp/regularlabs",
     "httpdocs/tmp",
     "public_html/tmp",
-    "tmp/regularlabs",
+    "administrator/cache",
+    "wp-content/uploads",
+    "wp-content/cache",
+    ...(input.tryDocroot ? [""] : []),
   ]);
 
   for (const dir of dirCandidates) {
     const remoteDir = dir ? joinRoot(root, dir) : root;
     if (input.canList) {
       const ok = await input.canList(remoteDir).catch(() => false);
-      if (!ok && dir !== "") continue;
+      if (!ok) continue;
     }
 
     const remotePath = joinRoot(remoteDir, fileName);
     try {
       await input.put(remotePath, body);
     } catch {
+      // Put fallito: passa oltre senza insistere sulla stessa sessione
       continue;
     }
 
     try {
       const urlDirs = uniqueStrings([
         dir,
-        // se abbiamo scritto in httpdocs/tmp ma l'URL è /tmp
         dir.replace(/^(httpdocs|public_html|www|web|public)\//, ""),
         dir.replace(/^(httpdocs|public_html|www|web|public)$/, ""),
       ]).filter((d) => !/^(httpdocs|public_html|www|web|public)$/i.test(d));
@@ -354,11 +403,10 @@ export async function detectPhpViaRemoteProbe(input: {
         urls.push(`${siteBase}/${path}`);
         urls.push(`${siteBase}/${path}?t=${token}`);
       }
-      // fallback assoluti tipici
-      urls.push(`${siteBase}/${fileName}`);
       urls.push(`${siteBase}/tmp/${fileName}`);
-      urls.push(`${siteBase}/images/${fileName}`);
+      urls.push(`${siteBase}/cache/${fileName}`);
       urls.push(`${siteBase}/media/${fileName}`);
+      urls.push(`${siteBase}/images/${fileName}`);
 
       for (const url of uniqueStrings(urls)) {
         const hit = await fetchProbeVersion(url, marker);
@@ -388,17 +436,24 @@ async function fetchProbeVersion(
       signal: AbortSignal.timeout(12_000),
     });
 
+    const sgHeader = res.headers.get("x-sg-php");
+    if (sgHeader) {
+      const v = parsePhpVersion(sgHeader);
+      if (v) return { version: v, source: "probe" };
+    }
+
     const fromHeaders = versionFromHeaders(res.headers);
     const text = (await res.text()).trim();
 
-    // Formato atteso: SGPHP|token|8.2.28
+    // Formato atteso: SGPHP|token|8.2.28  oppure SG|8.2.28
     if (text.includes(marker)) {
       const after = text.split(marker)[1] ?? "";
       const v = parsePhpVersion(after.split(/[\s<]/)[0] ?? after);
       if (v) return { version: v, source: "probe" };
     }
+    const sgPipe = text.match(/\bSG\|(\d+\.\d+(?:\.\d+)?)\b/);
+    if (sgPipe?.[1]) return { version: sgPipe[1], source: "probe" };
 
-    // Risposta pulita solo versione
     if (res.ok) {
       const v = parsePhpVersion(text);
       if (v && /^[\d.]+$/.test(text.trim())) {
@@ -406,7 +461,6 @@ async function fetchProbeVersion(
       }
     }
 
-    // Header X-Powered-By comparso sulla risposta del probe
     if (fromHeaders) return { version: fromHeaders, source: "probe" };
   } catch {
     /* ignore */

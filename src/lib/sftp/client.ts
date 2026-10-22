@@ -14,13 +14,18 @@ export async function withSftp<T>(
     throw new Error("Trasferimento file: manca password o chiave privata");
   }
 
+  // Rediscovery solo se manca protocollo/porta, o root sospetta.
+  // Con root "." NON forzare rediscovery: su molti hosting (Plesk) la home FTP
+  // è già httpdocs chroot — riscoprire può cadere sul fallback "httpdocs" vuoto.
   let effective = creds;
-  if (
+  const needsDiscovery =
     !creds.protocol ||
+    !creds.port ||
     !creds.rootPath ||
-    creds.rootPath === "." ||
-    creds.rootPath === "/"
-  ) {
+    creds.rootPath === "/" ||
+    creds.rootPath === "";
+
+  if (needsDiscovery) {
     const discovery = await discoverSftp(creds);
     effective = {
       ...creds,
@@ -44,7 +49,7 @@ export async function withSftp<T>(
                 ? "implicit"
                 : true
               : false,
-          timeoutMs: 20_000,
+          timeoutMs: 25_000,
         })
       : await connectSftp({
           host: effective.host,
@@ -52,15 +57,26 @@ export async function withSftp<T>(
           username: effective.username,
           password: effective.password,
           privateKey: effective.privateKey,
-          timeoutMs: 20_000,
+          timeoutMs: 25_000,
         });
 
   try {
-    const root = await ensureReadableRoot(client, effective.rootPath);
+    const root = await ensureReadableRoot(client, effective.rootPath ?? ".");
     return await fn(client, root);
   } finally {
     await client.end().catch(() => undefined);
   }
+}
+
+/** True se la listing sembra una docroot CMS (WP/Joomla). */
+function looksLikeCmsDocroot(names: string[]): boolean {
+  const set = new Set(names);
+  return (
+    set.has("configuration.php") ||
+    set.has("wp-config.php") ||
+    (set.has("libraries") && set.has("administrator")) ||
+    (set.has("wp-includes") && set.has("wp-content"))
+  );
 }
 
 async function ensureReadableRoot(
@@ -68,29 +84,44 @@ async function ensureReadableRoot(
   raw: string,
 ): Promise<string> {
   const preferred = raw.replace(/\/$/, "") || ".";
-  try {
-    const list = await client.list(preferred);
-    if (Array.isArray(list)) return preferred;
-  } catch {
-    /* fall through */
-  }
 
-  for (const path of [
+  // Su Plesk/chroot la home FTP è già httpdocs: la sottocartella "httpdocs" non esiste.
+  const candidates = [
+    preferred,
     preferred.replace(/^\//, ""),
+    ".",
     "httpdocs",
     "public_html",
     "www",
     "web",
-    ".",
-  ]) {
+    "public",
+    "htdocs",
+  ].filter((v, i, arr) => arr.indexOf(v) === i);
+
+  let fallbackReadable: string | null = null;
+
+  for (const path of candidates) {
     try {
       const list = await client.list(path);
-      if (list?.length) return path;
+      if (!list?.length) continue;
+      if (!fallbackReadable) fallbackReadable = path;
+      if (looksLikeCmsDocroot(list.map((e) => e.name))) {
+        return path;
+      }
     } catch {
       /* next */
     }
   }
-  return preferred;
+
+  // Se preferred era httpdocs ma vuoto/inesistente, e "." è leggibile → usa "."
+  if (
+    /^(httpdocs|public_html|www|web|htdocs)$/i.test(preferred) &&
+    fallbackReadable
+  ) {
+    return fallbackReadable;
+  }
+
+  return fallbackReadable ?? preferred;
 }
 
 export async function readTextFile(
@@ -101,13 +132,20 @@ export async function readTextFile(
   return buf.toString("utf8");
 }
 
+export type RemoteFileEntry = {
+  path: string;
+  size?: number;
+  /** Epoch ms — mtime sul server */
+  modifyTime?: number;
+};
+
 export async function listRecursive(
   client: RemoteFsClient,
   dir: string,
   maxFiles = 2000,
-): Promise<string[]> {
+): Promise<RemoteFileEntry[]> {
   const { isDirEntry } = await import("./paths");
-  const out: string[] = [];
+  const out: RemoteFileEntry[] = [];
 
   async function walk(current: string) {
     if (out.length >= maxFiles) return;
@@ -133,14 +171,27 @@ export async function listRecursive(
           await client.list(full);
           await walk(full);
         } catch {
-          out.push(full);
+          out.push({
+            path: full,
+            size: entry.size,
+            modifyTime: entry.modifyTime,
+          });
         }
       } else {
-        out.push(full);
+        out.push({
+          path: full,
+          size: entry.size,
+          modifyTime: entry.modifyTime,
+        });
       }
     }
   }
 
   await walk(dir);
   return out;
+}
+
+export function modifyTimeToIso(ms?: number): string | undefined {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return undefined;
+  return new Date(ms).toISOString();
 }

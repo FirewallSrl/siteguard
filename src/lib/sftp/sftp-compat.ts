@@ -42,6 +42,10 @@ class SftpRemoteClient implements RemoteFsClient {
         | "-"
         | "l",
       size: e.size,
+      modifyTime:
+        typeof e.modifyTime === "number" && e.modifyTime > 0
+          ? e.modifyTime
+          : undefined,
     }));
   }
 
@@ -54,11 +58,19 @@ class SftpRemoteClient implements RemoteFsClient {
     await this.client.put(buf, path);
   }
 
-  async stat(path: string): Promise<{ size: number; isDirectory: boolean }> {
+  async stat(path: string): Promise<{
+    size: number;
+    isDirectory: boolean;
+    modifyTime?: number;
+  }> {
     const s = await this.client.stat(path);
     return {
       size: s.size,
       isDirectory: s.isDirectory,
+      modifyTime:
+        typeof s.modifyTime === "number" && s.modifyTime > 0
+          ? s.modifyTime
+          : undefined,
     };
   }
 

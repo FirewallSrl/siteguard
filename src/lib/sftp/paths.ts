@@ -100,7 +100,12 @@ export async function findJoomlaRoot(
 ): Promise<{ root: string; score: number; tried: string[] } | null> {
   const start = (startRoot || ".").replace(/\/$/, "") || ".";
   const tried: string[] = [];
-  const queue: Array<{ path: string; depth: number }> = [{ path: start, depth: 0 }];
+  // Se partiamo da httpdocs e siamo già in chroot, prova subito anche "."
+  const seeds = uniqueSeedPaths(start);
+  const queue: Array<{ path: string; depth: number }> = seeds.map((path) => ({
+    path,
+    depth: 0,
+  }));
   const seen = new Set<string>();
   let best: { root: string; score: number } | null = null;
 
@@ -196,6 +201,24 @@ export async function findJoomlaRoot(
 
   if (!best || best.score < 3) return null;
   return { root: best.root, score: best.score, tried };
+}
+
+function uniqueSeedPaths(start: string): string[] {
+  const out: string[] = [];
+  const push = (p: string) => {
+    const v = (p || ".").replace(/\/$/, "") || ".";
+    if (!out.includes(v)) out.push(v);
+  };
+  push(start);
+  push(".");
+  // httpdocs richiesto dall'operatore ma spesso = home chroot
+  if (/^(httpdocs|public_html|www|web|htdocs)$/i.test(start)) {
+    push(".");
+  } else {
+    push(joinPath(start, "httpdocs"));
+    push("httpdocs");
+  }
+  return out;
 }
 
 export async function findWordpressRoot(

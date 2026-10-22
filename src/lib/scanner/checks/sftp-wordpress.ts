@@ -1,7 +1,26 @@
 import type { RemoteFsClient } from "../../sftp/client";
 import type { ScanFinding } from "../types";
 import { isRiskyPath, scanTextContent } from "../malware-patterns";
-import { listRecursive, readTextFile } from "../../sftp/client";
+import {
+  listRecursive,
+  modifyTimeToIso,
+  readTextFile,
+} from "../../sftp/client";
+
+function fileEvidence(
+  filePath: string,
+  extra: Record<string, unknown> = {},
+  modifyTime?: number,
+): Record<string, unknown> {
+  const modifiedAt = modifyTimeToIso(modifyTime);
+  return {
+    filePath,
+    ...extra,
+    ...(modifiedAt
+      ? { modifiedAt, modifiedAtSource: "ftp_mtime" as const }
+      : {}),
+  };
+}
 
 function planDelete(filePath: string, risk: ScanFinding["proposedPlan"]["risk"]): ScanFinding["proposedPlan"] {
   return {
@@ -108,8 +127,15 @@ export async function runWordpressSftpChecks(
 
   // --- .htaccess ---
   try {
-    const ht = await readTextFile(client, `${base}/.htaccess`);
-    const hits = scanTextContent(ht, `${base}/.htaccess`, {
+    const htPath = `${base}/.htaccess`;
+    const ht = await readTextFile(client, htPath);
+    let htMtime: number | undefined;
+    try {
+      htMtime = (await client.stat(htPath)).modifyTime;
+    } catch {
+      /* ignore */
+    }
+    const hits = scanTextContent(ht, htPath, {
       riskyLocation: true,
     });
     for (const hit of hits) {
@@ -118,11 +144,11 @@ export async function runWordpressSftpChecks(
         severity: hit.severity,
         title: ".htaccess sospetto",
         description: hit.description,
-        evidence: {
-          filePath: hit.filePath,
-          patternId: hit.patternId,
-          weight: hit.weight,
-        },
+        evidence: fileEvidence(
+          hit.filePath,
+          { patternId: hit.patternId, weight: hit.weight },
+          htMtime,
+        ),
         proposedPlan: planDelete(hit.filePath, hit.severity),
       });
     }
@@ -132,7 +158,7 @@ export async function runWordpressSftpChecks(
         severity: "high",
         title: "Redirect sospetto in .htaccess",
         description: "Possibile redirect verso dominio esterno.",
-        evidence: { filePath: `${base}/.htaccess` },
+        evidence: fileEvidence(htPath, {}, htMtime),
         proposedPlan: {
           summary: "Revisionare regole RewriteRule in .htaccess",
           steps: ["Backup .htaccess", "Rimuovere redirect non autorizzati"],
@@ -155,13 +181,13 @@ export async function runWordpressSftpChecks(
   ];
 
   for (const dir of scanDirs) {
-    let files: string[] = [];
+    let files: Awaited<ReturnType<typeof listRecursive>> = [];
     try {
       files = await listRecursive(client, dir, 1200);
     } catch {
       continue;
     }
-    const phpFiles = files.filter((f) => /\.php$/i.test(f));
+    const phpFiles = files.filter((f) => /\.php$/i.test(f.path));
     const inUploads = /\/uploads/i.test(dir);
 
     if (inUploads && phpFiles.length > 0) {
@@ -171,7 +197,13 @@ export async function runWordpressSftpChecks(
         title: `${phpFiles.length} file PHP in uploads`,
         description:
           "In uploads non dovrebbero esserci PHP eseguibili (spesso backdoor).",
-        evidence: { sample: phpFiles.slice(0, 20), count: phpFiles.length },
+        evidence: {
+          sample: phpFiles.slice(0, 20).map((f) => ({
+            path: f.path,
+            modifiedAt: modifyTimeToIso(f.modifyTime) ?? null,
+          })),
+          count: phpFiles.length,
+        },
         proposedPlan: {
           summary: "Rimuovere PHP da uploads dopo analisi",
           steps: [
@@ -187,22 +219,22 @@ export async function runWordpressSftpChecks(
 
     for (const file of phpFiles.slice(0, 150)) {
       try {
-        const content = await readTextFile(client, file);
-        const hits = scanTextContent(content, file, {
-          riskyLocation: isRiskyPath(file) || inUploads,
+        const content = await readTextFile(client, file.path);
+        const hits = scanTextContent(content, file.path, {
+          riskyLocation: isRiskyPath(file.path) || inUploads,
         });
         for (const hit of hits.filter((h) => h.weight >= 5 || inUploads)) {
           findings.push({
             type: "malware",
             severity: hit.severity,
-            title: `File sospetto: ${file.split("/").pop()}`,
+            title: `File sospetto: ${file.path.split("/").pop()}`,
             description: hit.description,
-            evidence: {
-              filePath: file,
-              patternId: hit.patternId,
-              weight: hit.weight,
-            },
-            proposedPlan: planDelete(file, hit.severity),
+            evidence: fileEvidence(
+              file.path,
+              { patternId: hit.patternId, weight: hit.weight },
+              file.modifyTime,
+            ),
+            proposedPlan: planDelete(file.path, hit.severity),
           });
         }
       } catch {
@@ -226,11 +258,11 @@ export async function runWordpressSftpChecks(
             severity: hit.severity,
             title: `Drop-in sospetto: ${entry.name}`,
             description: hit.description,
-            evidence: {
-              filePath: full,
-              patternId: hit.patternId,
-              weight: hit.weight,
-            },
+            evidence: fileEvidence(
+              full,
+              { patternId: hit.patternId, weight: hit.weight },
+              entry.modifyTime,
+            ),
             proposedPlan: planDelete(full, hit.severity),
           });
         }
@@ -269,7 +301,7 @@ export async function runWordpressSftpChecks(
         title: `PHP non standard in root: ${entry.name}`,
         description:
           "File PHP inatteso nella root WordPress — verificare se legittimo.",
-        evidence: { filePath: full },
+        evidence: fileEvidence(full, {}, entry.modifyTime),
         proposedPlan: planDelete(full, "high"),
       });
       try {
@@ -282,11 +314,11 @@ export async function runWordpressSftpChecks(
             severity: hit.severity,
             title: `Root sospetta: ${entry.name}`,
             description: hit.description,
-            evidence: {
-              filePath: full,
-              patternId: hit.patternId,
-              weight: hit.weight,
-            },
+            evidence: fileEvidence(
+              full,
+              { patternId: hit.patternId, weight: hit.weight },
+              entry.modifyTime,
+            ),
             proposedPlan: planDelete(full, hit.severity),
           });
         }

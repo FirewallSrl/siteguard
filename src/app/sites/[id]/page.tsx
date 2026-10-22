@@ -7,6 +7,8 @@ import { it } from "date-fns/locale";
 import { ArrowLeft } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { ScanButton } from "@/components/scan-button";
+import { DeleteSiteButton } from "@/components/delete-site-button";
+import { SendReportButton } from "@/components/send-report-button";
 import { RemediationBoard } from "@/components/remediation-board";
 import { SiteWorkspace } from "@/components/site-workspace";
 
@@ -73,6 +75,7 @@ async function SiteDetailContent({ params, searchParams }: Props) {
 
   const findingsSlot = (
     <RemediationBoard
+      siteId={site.id}
       findings={actionable.map((f) => ({
         id: f.id,
         type: f.type,
@@ -81,6 +84,7 @@ async function SiteDetailContent({ params, searchParams }: Props) {
         description: f.description,
         evidence: f.evidence,
         proposedPlan: f.proposedPlan,
+        createdAt: f.createdAt.toISOString(),
       }))}
     />
   );
@@ -173,12 +177,17 @@ async function SiteDetailContent({ params, searchParams }: Props) {
                 : "Mai scansionato — configura accessi, poi scansiona"}
             </p>
           </div>
-          <ScanButton siteId={site.id} />
+          <div className="flex flex-wrap items-start gap-2">
+            <ScanButton siteId={site.id} />
+            <SendReportButton siteId={site.id} siteName={site.name} />
+            <DeleteSiteButton siteId={site.id} siteName={site.name} />
+          </div>
         </div>
       </header>
 
       <SiteWorkspace
         siteId={site.id}
+        siteUrl={site.url}
         findingsCount={actionable.length}
         findingsSlot={findingsSlot}
         scans={site.scans}

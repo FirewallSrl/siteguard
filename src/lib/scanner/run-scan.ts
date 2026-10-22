@@ -174,6 +174,9 @@ export async function runSiteScan(
     const inventoryPayload =
       inventory &&
       (scope === "full" ||
+        scope === "ssl" ||
+        scope === "integrity" ||
+        scope === "links" ||
         scopeHas(scope, "inventory") ||
         scopeHas(scope, "php") ||
         scopeHas(scope, "updates"))
@@ -246,9 +249,19 @@ async function mergeInventory(
   next: SiteInventory,
   scope: ScanScope,
 ): Promise<SiteInventory> {
-  if (scope === "full" || !existingJson) return next;
+  const { dedupeInventoryNotes } = await import("./inventory/types");
+  if (scope === "full" || !existingJson) {
+    return {
+      ...next,
+      notes: dedupeInventoryNotes(next.notes ?? []),
+    };
+  }
   try {
     const prev = JSON.parse(existingJson) as SiteInventory;
+    const mergedNotes = dedupeInventoryNotes([
+      ...(prev.notes ?? []),
+      ...(next.notes ?? []),
+    ]).slice(-12);
     return {
       ...prev,
       ...next,
@@ -261,12 +274,15 @@ async function mergeInventory(
       themes: next.themes?.length ? next.themes : prev.themes,
       extensions: next.extensions?.length ? next.extensions : prev.extensions,
       modules: next.modules?.length ? next.modules : prev.modules,
-      notes: [...(prev.notes ?? []), ...(next.notes ?? [])].slice(-12),
+      notes: mergedNotes,
       source: Array.from(new Set([...(prev.source ?? []), ...(next.source ?? [])])),
       collectedAt: next.collectedAt || prev.collectedAt,
     };
   } catch {
-    return next;
+    return {
+      ...next,
+      notes: dedupeInventoryNotes(next.notes ?? []),
+    };
   }
 }
 
@@ -302,10 +318,11 @@ async function collectLive(
       scope === "php")
   ) {
     try {
+      const { dedupeInventoryNotes } = await import("./inventory/types");
       const prev = JSON.parse(site.inventoryJson) as SiteInventory;
       Object.assign(inventory, prev, {
         collectedAt: new Date().toISOString(),
-        notes: [...(prev.notes ?? [])],
+        notes: dedupeInventoryNotes(prev.notes ?? []),
       });
     } catch {
       /* ignore */
@@ -315,11 +332,25 @@ async function collectLive(
   let sslEv: { daysLeft?: number; validTo?: string } | undefined;
   const https = site.url.startsWith("https:");
 
-  if (scopeHas(scope, "ssl")) {
-    progress.start("ssl", "Verifica certificato…");
+  // SSL: sempre in scope "ssl"/full; altrimenti probe se manca in inventario
+  // (evita "No HTTPS" falso dopo scan inventory/integrity).
+  const shouldCheckSsl = scopeHas(scope, "ssl") || !inventory.ssl;
+  if (shouldCheckSsl) {
+    if (scopeHas(scope, "ssl")) {
+      progress.start("ssl", "Verifica certificato…");
+    }
     const sslResult = await checkSsl(site.url);
-    findings.push(...sslResult.findings);
     inventory.ssl = sslResult.ssl;
+    if (scopeHas(scope, "ssl")) {
+      findings.push(...sslResult.findings);
+    } else {
+      // Probe silenzioso: solo scadenze critiche/alte
+      findings.push(
+        ...sslResult.findings.filter(
+          (f) => f.severity === "critical" || f.severity === "high",
+        ),
+      );
+    }
     sslEv =
       sslResult.ssl.daysLeft != null || sslResult.ssl.validTo
         ? {
@@ -327,18 +358,20 @@ async function collectLive(
             validTo: sslResult.ssl.validTo,
           }
         : undefined;
-    progress.done(
-      "ssl",
-      sslEv?.daysLeft != null
-        ? `HTTPS · ${sslEv.daysLeft} giorni residui${
-            sslEv.validTo
-              ? ` · scade ${sslEv.validTo.slice(0, 10)}`
-              : ""
-          }`
-        : inventory.ssl.https
-          ? "HTTPS attivo"
-          : "Senza HTTPS",
-    );
+    if (scopeHas(scope, "ssl")) {
+      progress.done(
+        "ssl",
+        sslEv?.daysLeft != null
+          ? `HTTPS · ${sslEv.daysLeft} giorni residui${
+              sslEv.validTo
+                ? ` · scade ${sslEv.validTo.slice(0, 10)}`
+                : ""
+            }`
+          : inventory.ssl.https
+            ? "HTTPS attivo"
+            : "Senza HTTPS",
+      );
+    }
   }
 
   if (scopeHas(scope, "links")) {
@@ -481,6 +514,34 @@ async function collectLive(
       scopeHas(scope, "updates") ||
       scope === "integrity");
 
+  // Sessione FTP dedicata solo al PHP: un put fallito non deve chiudere
+  // la sessione usata poi per inventario/integrity.
+  if (secrets?.sftp && scopeHas(scope, "php") && !inventory.phpVersion) {
+    const { withSftp } = await import("../sftp/client");
+    try {
+      progress.setCurrent("Rilevamento PHP via FTP (sessione dedicata)…");
+      await withSftp(secrets.sftp, async (client, root) => {
+        const hit = await detectPhpOverFs(client, root, site.url, site.cms);
+        if (!hit) return;
+        await applyPhpHit(inventory, findings, hit);
+        const detail = `PHP ${hit.version} via ${hit.source}${
+          inventory.phpAdvisories?.length
+            ? ` · ${inventory.phpAdvisories.length} advisory`
+            : " · ok"
+        }`;
+        progress.done("php", detail);
+        phpFinalized = true;
+      });
+    } catch (err) {
+      inventory.notes?.push(
+        `PHP probe: sessione FTP interrotta (${
+          err instanceof Error ? err.message.slice(0, 120) : "errore"
+        })`,
+      );
+    }
+    // Se fallisce, non chiudere lo step: retry nella sessione inventario sotto.
+  }
+
   if (secrets?.sftp && runSftpBlock) {
     const transferProto = (secrets.sftp.protocol ?? "sftp").toUpperCase();
     progress.start("sftp", `${transferProto} ${secrets.sftp.host}…`);
@@ -526,94 +587,24 @@ async function collectLive(
         }`,
       );
 
+      // Fallback PHP se la sessione dedicata non ha trovato nulla
       if (scopeHas(scope, "php") && !inventory.phpVersion) {
-        const {
-          detectPhpFromSftp,
-          detectPhpViaRemoteProbe,
-          matchPhpAdvisories,
-          findingsFromPhpHits,
-        } = await import("./advisories/php");
-        const { readTextFile } = await import("../sftp/client");
-        const { canListDir } = await import("../sftp/paths");
-
-        progress.setCurrent("Rilevamento PHP via filesystem…");
-        let hit =
-          (await detectPhpFromSftp(
-            (path) => readTextFile(client, path),
-            effectiveRoot,
-          )) ?? null;
-
-        // Prova anche la root originale se diversa
-        if (!hit && root !== effectiveRoot) {
-          hit =
-            (await detectPhpFromSftp(
-              (path) => readTextFile(client, path),
-              root,
-            )) ?? null;
-        }
-
-        if (!hit) {
-          progress.setCurrent("Probe PHP temporaneo (più path)…");
-          for (const probeRoot of uniqueProbeRoots(effectiveRoot, root)) {
-            hit = await detectPhpViaRemoteProbe({
-              siteUrl: site.url,
-              root: probeRoot,
-              put: (path, data) => client.put(path, data),
-              del: (path) => client.delete(path),
-              canList: (path) => canListDir(client, path),
-            });
-            if (hit) break;
-          }
-        }
-
+        progress.setCurrent("Retry PHP su docroot CMS…");
+        const hit = await detectPhpOverFs(
+          client,
+          effectiveRoot,
+          site.url,
+          site.cms,
+        );
         if (hit) {
-          inventory.phpVersion = hit.version;
-          inventory.phpSource = hit.source;
-          inventory.notes = (inventory.notes ?? []).filter(
-            (n) => !/PHP: versione non rilevata/i.test(n),
+          await applyPhpHit(inventory, findings, hit);
+          progress.done(
+            "php",
+            `PHP ${hit.version} via ${hit.source}`,
           );
-          inventory.notes?.push(
-            `PHP ${hit.version} rilevato via ${hit.source}`,
-          );
-          const hits = matchPhpAdvisories(hit.version);
-          inventory.phpAdvisories = hits.map((h) => ({
-            id: h.advisory.id,
-            title: h.advisory.title,
-            severity: h.advisory.severity,
-            cves: h.advisory.cves,
-            fixedIn: h.fixedIn,
-            eol: h.eol,
-            sources: h.advisory.sources,
-          }));
-          const existing = new Set(
-            findings
-              .filter((f) => f.type === "vulnerability")
-              .map((f) =>
-                String(
-                  (f.evidence as { advisoryId?: string })?.advisoryId ?? "",
-                ),
-              ),
-          );
-          for (const f of findingsFromPhpHits(hits, hit.version)) {
-            const id = String(
-              (f.evidence as { advisoryId?: string })?.advisoryId ?? "",
-            );
-            if (!existing.has(id)) findings.push(f);
-          }
-          const detail = `PHP ${hit.version} via ${hit.source}${
-            hits.length ? ` · ${hits.length} advisory` : " · ok"
-          }`;
-          progress.done("php", detail);
-          progress.setCurrent(detail);
           phpFinalized = true;
         } else if (!phpFinalized) {
-          inventory.notes = (inventory.notes ?? []).filter(
-            (n) => !/PHP: versione non rilevata/i.test(n),
-          );
-          inventory.notes?.push(
-            "PHP: versione non rilevata (header nascosti, filesystem senza indizi, probe HTTP fallito — hosting può bloccare upload/esecuzione PHP nelle cartelle provate).",
-          );
-          progress.done("php", "PHP non rilevato dopo probe FTP");
+          progress.done("php", "PHP non rilevato");
           phpFinalized = true;
         }
       } else if (scopeHas(scope, "php") && !phpFinalized) {
@@ -735,9 +726,7 @@ async function collectLive(
 
   if (scopeHas(scope, "php") && !phpFinalized) {
     if (!inventory.phpVersion) {
-      inventory.notes = (inventory.notes ?? []).filter(
-        (n) => !/PHP: versione non rilevata/i.test(n),
-      );
+      inventory.notes = (inventory.notes ?? []).filter((n) => !/^PHP[: ]/i.test(n));
       inventory.notes?.push(
         "PHP: versione non rilevata dopo header e tentativo FTP/SFTP.",
       );
@@ -826,10 +815,6 @@ function uniqueProbeRoots(...roots: string[]): string[] {
   for (const r of roots) {
     const v = (r || ".").replace(/\/$/, "") || ".";
     if (!out.includes(v)) out.push(v);
-    for (const leaf of ["httpdocs", "public_html", "www", "web", "public"]) {
-      const p = v === "." ? leaf : `${v}/${leaf}`;
-      if (!out.includes(p)) out.push(p);
-    }
   }
   return out;
 }
@@ -889,4 +874,68 @@ async function runPhpAdvisoryCheck(
   }
 
   return findingsFromPhpHits(hits, hit.version);
+}
+
+type PhpHit = {
+  version: string;
+  source: "header" | "sftp" | "composer" | "probe" | "unknown";
+};
+
+async function detectPhpOverFs(
+  client: import("../sftp/remote-fs").RemoteFsClient,
+  root: string,
+  siteUrl: string,
+  _cms: string,
+): Promise<PhpHit | null> {
+  const { detectPhpViaRemoteProbe } = await import("./advisories/php");
+  const { canListDir } = await import("../sftp/paths");
+
+  // PRIMA il probe upload: su FTP passivo le molte GET di detectPhpFromSftp
+  // (selector/composer) possono lasciare il data-socket morto e far fallire
+  // i put successivi. Il probe su tmp/ è il metodo affidabile.
+  return detectPhpViaRemoteProbe({
+    siteUrl,
+    root,
+    put: (path, data) => client.put(path, data),
+    del: (path) => client.delete(path),
+    canList: (path) => canListDir(client, path),
+    tryDocroot: false,
+  });
+}
+
+async function applyPhpHit(
+  inventory: SiteInventory,
+  findings: ScanFinding[],
+  hit: PhpHit,
+) {
+  const { matchPhpAdvisories, findingsFromPhpHits } = await import(
+    "./advisories/php"
+  );
+  inventory.phpVersion = hit.version;
+  inventory.phpSource = hit.source;
+  inventory.notes = (inventory.notes ?? []).filter((n) => !/^PHP[: ]/i.test(n));
+  inventory.notes?.push(`PHP ${hit.version} rilevato via ${hit.source}`);
+  const hits = matchPhpAdvisories(hit.version);
+  inventory.phpAdvisories = hits.map((h) => ({
+    id: h.advisory.id,
+    title: h.advisory.title,
+    severity: h.advisory.severity,
+    cves: h.advisory.cves,
+    fixedIn: h.fixedIn,
+    eol: h.eol,
+    sources: h.advisory.sources,
+  }));
+  const existing = new Set(
+    findings
+      .filter((f) => f.type === "vulnerability")
+      .map((f) =>
+        String((f.evidence as { advisoryId?: string })?.advisoryId ?? ""),
+      ),
+  );
+  for (const f of findingsFromPhpHits(hits, hit.version)) {
+    const id = String(
+      (f.evidence as { advisoryId?: string })?.advisoryId ?? "",
+    );
+    if (!existing.has(id)) findings.push(f);
+  }
 }
