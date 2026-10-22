@@ -104,7 +104,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     body: [],
     bullets: [
       "SSL: assenza HTTPS, certificato scaduto / in scadenza (14 / 30 giorni)",
-      "Link rotti: crawl homepage + poche pagine, fino a ~60 URL (4xx/5xx/timeout)",
+      "URL rotti: crawl fino a 10 pagine, fino a ~100 link (4xx/5xx/timeout) — risultato in Panoramica e Finding",
       "Joomla API: troppi Super User, inventario estensioni, errori token",
       "Joomla SFTP: scan PHP in images/tmp/root con stessi pattern malware",
     ],

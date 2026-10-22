@@ -33,6 +33,18 @@ export type SiteInventory = {
     total?: number;
     admins?: number;
   };
+  /** Esito check URL / link rotti */
+  brokenLinks?: {
+    pagesScanned: number;
+    linksChecked: number;
+    brokenCount: number;
+    items?: Array<{
+      url: string;
+      status: number | null;
+      from?: string;
+      error?: string | null;
+    }>;
+  };
   notes?: string[];
   source: Array<"sftp" | "api" | "public">;
 };

@@ -83,8 +83,8 @@ export async function runSiteScan(siteId: string, scanId: string) {
 
       const skipAction =
         f.severity === "info" &&
-        f.type === "config" &&
-        /nessun problema/i.test(f.title);
+        ((f.type === "config" && /nessun problema/i.test(f.title)) ||
+          (f.type === "broken_link" && /nessun url rotto/i.test(f.title)));
 
       if (!skipAction) {
         await prisma.action.create({
@@ -212,18 +212,27 @@ async function collectLive(
   const { checkBrokenLinks } = await import("./checks/broken-links");
   const linkReport = await checkBrokenLinks(site.url);
   findings.push(...linkReport.findings);
-  if (linkReport.linksChecked > 0) {
-    inventory.notes?.push(
-      linkReport.brokenCount > 0
-        ? `${linkReport.brokenCount} link rotti su ${linkReport.linksChecked} controllati (${linkReport.pagesScanned} pagine)`
-        : `Link check OK: ${linkReport.linksChecked} link su ${linkReport.pagesScanned} pagine`,
-    );
-  }
+  inventory.brokenLinks = {
+    pagesScanned: linkReport.pagesScanned,
+    linksChecked: linkReport.linksChecked,
+    brokenCount: linkReport.brokenCount,
+    items: linkReport.items.map((b) => ({
+      url: b.url,
+      status: b.status,
+      from: b.from,
+      error: b.error ?? null,
+    })),
+  };
+  inventory.notes?.push(
+    linkReport.brokenCount > 0
+      ? `${linkReport.brokenCount} URL rotti su ${linkReport.linksChecked} controllati (${linkReport.pagesScanned} pagine)`
+      : `URL check OK: ${linkReport.linksChecked} link su ${linkReport.pagesScanned} pagine`,
+  );
   progress.done(
     "links",
     linkReport.linksChecked > 0
-      ? `${linkReport.linksChecked} link · ${linkReport.brokenCount} rotti`
-      : "Nessun link controllato",
+      ? `${linkReport.linksChecked} URL · ${linkReport.brokenCount} rotti`
+      : "Nessun URL estratto dalla homepage",
   );
 
   if (!site.secretsEnc) {

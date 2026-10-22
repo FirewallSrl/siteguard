@@ -62,10 +62,15 @@ function InventoryDashboard({
   const coreFailNote = inv.notes?.find((n) =>
     /impossibile verificare.*core/i.test(n),
   );
-  const linkNote = inv.notes?.find((n) => /link/i.test(n));
+  const linkNote = inv.notes?.find((n) => /link|url/i.test(n));
+  const broken = inv.brokenLinks;
   const otherNotes =
     inv.notes?.filter(
-      (n) => n !== coreFailNote && n !== linkNote && !/core .*aggiornato/i.test(n),
+      (n) =>
+        n !== coreFailNote &&
+        n !== linkNote &&
+        !/core .*aggiornato/i.test(n) &&
+        !/core joomla|core wordpress/i.test(n),
     ) ?? [];
 
   const sslOk = inv.ssl?.https && (inv.ssl.daysLeft == null || inv.ssl.daysLeft > 14);
@@ -146,8 +151,30 @@ function InventoryDashboard({
           />
         )}
 
-        {linkNote && /rotti/i.test(linkNote) && (
-          <PriorityRow tone="warn" title="Link rotti" body={linkNote} />
+        {broken && broken.brokenCount > 0 && (
+          <PriorityRow
+            tone="warn"
+            title={`${broken.brokenCount} URL rotti`}
+            body={`${broken.linksChecked} link controllati su ${broken.pagesScanned} pagine`}
+            action={
+              onOpenRemediation ? (
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={onOpenRemediation}
+                >
+                  Vedi finding
+                </button>
+              ) : undefined
+            }
+          />
+        )}
+        {broken && broken.brokenCount === 0 && broken.linksChecked > 0 && (
+          <PriorityRow
+            tone="ok"
+            title="URL del sito ok"
+            body={`${broken.linksChecked} link verificati · nessun 4xx/5xx`}
+          />
         )}
       </section>
 
@@ -171,11 +198,45 @@ function InventoryDashboard({
           value={String(pending)}
           ok={pending === 0}
         />
-        {inv.database && <SnapItem label="DB" value={inv.database} />}
-        {linkNote && !/rotti/i.test(linkNote) && (
-          <SnapItem label="Link" value="ok" ok />
+        {broken && (
+          <SnapItem
+            label="URL"
+            value={
+              broken.brokenCount > 0
+                ? `${broken.brokenCount} rotti`
+                : `${broken.linksChecked} ok`
+            }
+            ok={broken.brokenCount === 0 && broken.linksChecked > 0}
+          />
         )}
+        {inv.database && <SnapItem label="DB" value={inv.database} />}
       </div>
+
+      {broken && broken.brokenCount > 0 && broken.items && broken.items.length > 0 && (
+        <section className="panel-well">
+          <div className="flex items-baseline justify-between px-1 pb-1">
+            <h3 className="text-sm font-semibold text-[var(--ink)]">
+              URL rotti
+            </h3>
+            <span className="chip chip-rose">{broken.brokenCount}</span>
+          </div>
+          {broken.items.slice(0, 10).map((item) => (
+            <div key={item.url} className="panel-row text-sm">
+              <span className="chip chip-rose shrink-0">
+                {item.status ?? "err"}
+              </span>
+              <a
+                href={item.url}
+                target="_blank"
+                rel="noreferrer"
+                className="min-w-0 flex-1 truncate font-mono text-xs hover:underline"
+              >
+                {item.url}
+              </a>
+            </div>
+          ))}
+        </section>
+      )}
 
       {/* Solo elementi da aggiornare */}
       {outdated.length > 0 && (

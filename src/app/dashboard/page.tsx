@@ -25,12 +25,38 @@ export default function DashboardPage() {
 
 async function DashboardContent() {
   await connection();
-  const sites = await prisma.site.findMany({
-    orderBy: { createdAt: "desc" },
-    include: {
-      findings: { where: { status: "open" }, select: { severity: true } },
-    },
-  });
+
+  if (!process.env.DATABASE_URL) {
+    return (
+      <div className="panel mx-auto max-w-lg px-6 py-10 text-center">
+        <p className="font-display text-xl font-bold text-[var(--ink)]">
+          Configura il database
+        </p>
+        <p className="mt-2 text-sm text-[var(--muted)]">
+          Su Vercel manca <code className="font-mono">DATABASE_URL</code>.
+          Aggiungila in Project Settings → Environment Variables e rideploya.
+        </p>
+      </div>
+    );
+  }
+
+  let sites: Awaited<ReturnType<typeof loadSites>>;
+  try {
+    sites = await loadSites();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Errore database";
+    return (
+      <div className="panel mx-auto max-w-lg px-6 py-10 text-center">
+        <p className="font-display text-xl font-bold text-[var(--ink)]">
+          Database non raggiungibile
+        </p>
+        <p className="mt-2 text-sm text-[var(--muted)]">{message}</p>
+        <p className="mt-3 text-xs text-[var(--muted)]">
+          Verifica host, porte, firewall e che Vercel possa raggiungere Postgres.
+        </p>
+      </div>
+    );
+  }
 
   const openCritical = sites.reduce(
     (acc, s) => acc + s.findings.filter((f) => f.severity === "critical").length,
@@ -228,6 +254,15 @@ async function DashboardContent() {
       </section>
     </div>
   );
+}
+
+async function loadSites() {
+  return prisma.site.findMany({
+    orderBy: { createdAt: "desc" },
+    include: {
+      findings: { where: { status: "open" }, select: { severity: true } },
+    },
+  });
 }
 
 function CheckBadge() {

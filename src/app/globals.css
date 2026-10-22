@@ -826,17 +826,43 @@ a {
   margin-top: 0.65rem;
 }
 
-.scan-panel {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 0.65rem);
-  z-index: 50;
-  width: min(22rem, calc(100vw - 2rem));
-  padding: 1rem 1.1rem 1.1rem;
+/* Toast fisso — fuori dall'hero, non ne modifica l'altezza */
+.scan-toast {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 80;
+  width: min(20.5rem, calc(100vw - 2rem));
+  max-height: min(70vh, 28rem);
+  display: flex;
+  flex-direction: column;
+  padding: 0.95rem 1rem 1rem;
   background: var(--bg-elevated);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.22);
   color: var(--ink);
+  animation: scan-toast-in 220ms ease both;
+}
+
+.scan-toast-steps {
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+@keyframes scan-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .scan-meter {
@@ -912,11 +938,9 @@ a {
 }
 
 @media (max-width: 860px) {
-  .scan-panel {
-    position: fixed;
+  .scan-toast {
     left: 1rem;
     right: 1rem;
-    top: auto;
     bottom: 1rem;
     width: auto;
   }
