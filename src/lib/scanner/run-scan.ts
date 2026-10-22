@@ -138,7 +138,8 @@ export async function runSiteScan(
       const skipAction =
         f.severity === "info" &&
         ((f.type === "config" && /nessun problema/i.test(f.title)) ||
-          (f.type === "broken_link" && /nessun url rotto/i.test(f.title)));
+          (f.type === "broken_link" && /nessun url rotto/i.test(f.title)) ||
+          (f.type === "malware" && /nessun segnale di compromissione/i.test(f.title)));
 
       if (!skipAction) {
         await prisma.action.create({
@@ -341,7 +342,7 @@ async function collectLive(
   }
 
   if (scopeHas(scope, "links")) {
-    progress.start("links", "Crawl pagine e verifica URL…");
+    progress.start("links", "Crawl pagine, link e anti-hack…");
     const { checkBrokenLinks } = await import("./checks/broken-links");
     const linkReport = await checkBrokenLinks(site.url);
     findings.push(...linkReport.findings);
@@ -356,6 +357,26 @@ async function collectLive(
         error: b.error ?? null,
       })),
     };
+
+    progress.setCurrent("Crawl compromissione (HTML / cloaking / path)…");
+    const { crawlCompromiseSignals } = await import(
+      "./checks/compromise-crawl"
+    );
+    const compromise = await crawlCompromiseSignals(site.url);
+    // In scope "links" salva solo malware con severity > info, oppure tutto in full/integrity
+    const compromiseFindings =
+      scope === "links"
+        ? compromise.findings.filter(
+            (f) => f.type === "malware" && f.severity !== "info",
+          )
+        : compromise.findings;
+    findings.push(...compromiseFindings);
+    inventory.notes?.push(
+      compromise.signals > 0
+        ? `Anti-hack crawl: ${compromise.signals} segnali · score ${compromise.score} (${compromise.pagesScanned} pagine)`
+        : `Anti-hack crawl OK: ${compromise.pagesScanned} pagine senza segnali forti`,
+    );
+
     inventory.notes?.push(
       linkReport.brokenCount > 0
         ? `${linkReport.brokenCount} URL rotti su ${linkReport.linksChecked} controllati (${linkReport.pagesScanned} pagine)`
@@ -363,29 +384,34 @@ async function collectLive(
     );
     progress.done(
       "links",
-      linkReport.linksChecked > 0
-        ? `${linkReport.linksChecked} URL · ${linkReport.brokenCount} rotti`
-        : "Nessun URL estratto dalla homepage",
+      `${linkReport.linksChecked} URL · ${linkReport.brokenCount} rotti · hack score ${compromise.score}`,
     );
   }
 
-  // PHP runtime: header pubblici subito; SFTP raffina dopo se disponibile
-  let phpChecked = false;
+  // PHP: header subito; se c'è SFTP/FTP non chiudere lo step — il probe raffina dopo
+  let phpFinalized = false;
   if (scopeHas(scope, "php")) {
     progress.start("php", "Rilevamento versione PHP…");
-    const phpFindings = await runPhpAdvisoryCheck(site.url, inventory);
+    const phpFindings = await runPhpAdvisoryCheck(site.url, inventory, {
+      deferMissingNote: Boolean(site.secretsEnc),
+    });
     findings.push(...phpFindings);
-    phpChecked = true;
-    progress.done(
-      "php",
-      inventory.phpVersion
-        ? `PHP ${inventory.phpVersion}${
-            inventory.phpAdvisories?.length
-              ? ` · ${inventory.phpAdvisories.length} advisory`
-              : " · ok"
-          }`
-        : "Versione PHP non esposta (header nascosti)",
-    );
+    if (inventory.phpVersion) {
+      progress.done(
+        "php",
+        `PHP ${inventory.phpVersion}${
+          inventory.phpAdvisories?.length
+            ? ` · ${inventory.phpAdvisories.length} advisory`
+            : " · ok"
+        }`,
+      );
+      phpFinalized = true;
+    } else if (!site.secretsEnc) {
+      progress.done("php", "Versione PHP non esposta (header nascosti)");
+      phpFinalized = true;
+    } else {
+      progress.setCurrent("Header nascosti — attendo probe FTP/SFTP…");
+    }
   }
 
   const needsCreds =
@@ -456,22 +482,99 @@ async function collectLive(
       scope === "integrity");
 
   if (secrets?.sftp && runSftpBlock) {
-    progress.start("sftp", `${secrets.sftp.host}…`);
+    const transferProto = (secrets.sftp.protocol ?? "sftp").toUpperCase();
+    progress.start("sftp", `${transferProto} ${secrets.sftp.host}…`);
     const { withSftp } = await import("../sftp/client");
     await withSftp(secrets.sftp, async (client, root) => {
-      progress.done("sftp", `Connesso · root ${root}`);
+      // Riposiziona automaticamente sulla docroot CMS se la root salvata è genitore/errata
+      let effectiveRoot = root;
+      try {
+        progress.setCurrent("Ricerca docroot CMS…");
+        if (site.cms === "joomla") {
+          const { findJoomlaRoot } = await import("../sftp/paths");
+          const found = await findJoomlaRoot(client, root);
+          if (found && found.score >= 3) {
+            effectiveRoot = found.root;
+            inventory.fsRoot = found.root;
+            if (found.root !== root) {
+              inventory.notes?.push(
+                `Docroot riposizionata: ${root} → ${found.root}`,
+              );
+            }
+          }
+        } else if (site.cms === "wordpress") {
+          const { findWordpressRoot } = await import("../sftp/paths");
+          const found = await findWordpressRoot(client, root);
+          if (found && found.score >= 3) {
+            effectiveRoot = found.root;
+            inventory.fsRoot = found.root;
+            if (found.root !== root) {
+              inventory.notes?.push(
+                `Docroot riposizionata: ${root} → ${found.root}`,
+              );
+            }
+          }
+        }
+      } catch {
+        /* keep root */
+      }
 
-      if (scopeHas(scope, "php")) {
-        const { detectPhpFromSftp, matchPhpAdvisories, findingsFromPhpHits } =
-          await import("./advisories/php");
+      progress.done(
+        "sftp",
+        `${transferProto} · root ${effectiveRoot}${
+          secrets.sftp!.port ? ` · :${secrets.sftp!.port}` : ""
+        }`,
+      );
+
+      if (scopeHas(scope, "php") && !inventory.phpVersion) {
+        const {
+          detectPhpFromSftp,
+          detectPhpViaRemoteProbe,
+          matchPhpAdvisories,
+          findingsFromPhpHits,
+        } = await import("./advisories/php");
         const { readTextFile } = await import("../sftp/client");
-        const hit = await detectPhpFromSftp(
-          (path) => readTextFile(client, path),
-          root,
-        );
-        if (hit && (!inventory.phpVersion || hit.source !== "composer")) {
+        const { canListDir } = await import("../sftp/paths");
+
+        progress.setCurrent("Rilevamento PHP via filesystem…");
+        let hit =
+          (await detectPhpFromSftp(
+            (path) => readTextFile(client, path),
+            effectiveRoot,
+          )) ?? null;
+
+        // Prova anche la root originale se diversa
+        if (!hit && root !== effectiveRoot) {
+          hit =
+            (await detectPhpFromSftp(
+              (path) => readTextFile(client, path),
+              root,
+            )) ?? null;
+        }
+
+        if (!hit) {
+          progress.setCurrent("Probe PHP temporaneo (più path)…");
+          for (const probeRoot of uniqueProbeRoots(effectiveRoot, root)) {
+            hit = await detectPhpViaRemoteProbe({
+              siteUrl: site.url,
+              root: probeRoot,
+              put: (path, data) => client.put(path, data),
+              del: (path) => client.delete(path),
+              canList: (path) => canListDir(client, path),
+            });
+            if (hit) break;
+          }
+        }
+
+        if (hit) {
           inventory.phpVersion = hit.version;
           inventory.phpSource = hit.source;
+          inventory.notes = (inventory.notes ?? []).filter(
+            (n) => !/PHP: versione non rilevata/i.test(n),
+          );
+          inventory.notes?.push(
+            `PHP ${hit.version} rilevato via ${hit.source}`,
+          );
           const hits = matchPhpAdvisories(hit.version);
           inventory.phpAdvisories = hits.map((h) => ({
             id: h.advisory.id,
@@ -482,11 +585,14 @@ async function collectLive(
             eol: h.eol,
             sources: h.advisory.sources,
           }));
-          // Evita duplicati se già creati dal check HTTP
           const existing = new Set(
             findings
               .filter((f) => f.type === "vulnerability")
-              .map((f) => String((f.evidence as { advisoryId?: string })?.advisoryId ?? "")),
+              .map((f) =>
+                String(
+                  (f.evidence as { advisoryId?: string })?.advisoryId ?? "",
+                ),
+              ),
           );
           for (const f of findingsFromPhpHits(hits, hit.version)) {
             const id = String(
@@ -494,14 +600,30 @@ async function collectLive(
             );
             if (!existing.has(id)) findings.push(f);
           }
-          if (phpChecked) {
-            progress.setCurrent(
-              `PHP ${hit.version} via ${hit.source}${
-                hits.length ? ` · ${hits.length} advisory` : ""
-              }`,
-            );
-          }
+          const detail = `PHP ${hit.version} via ${hit.source}${
+            hits.length ? ` · ${hits.length} advisory` : " · ok"
+          }`;
+          progress.done("php", detail);
+          progress.setCurrent(detail);
+          phpFinalized = true;
+        } else if (!phpFinalized) {
+          inventory.notes = (inventory.notes ?? []).filter(
+            (n) => !/PHP: versione non rilevata/i.test(n),
+          );
+          inventory.notes?.push(
+            "PHP: versione non rilevata (header nascosti, filesystem senza indizi, probe HTTP fallito — hosting può bloccare upload/esecuzione PHP nelle cartelle provate).",
+          );
+          progress.done("php", "PHP non rilevato dopo probe FTP");
+          phpFinalized = true;
         }
+      } else if (scopeHas(scope, "php") && !phpFinalized) {
+        progress.done(
+          "php",
+          inventory.phpVersion
+            ? `PHP ${inventory.phpVersion}`
+            : "PHP non rilevato",
+        );
+        phpFinalized = true;
       }
 
       if (scopeHas(scope, "inventory") || scope === "integrity" || scope === "updates") {
@@ -514,7 +636,10 @@ async function collectLive(
             "./checks/sftp-wordpress"
           );
           progress.setCurrent("Check integrity WordPress…");
-          const sftpFindings = await runWordpressSftpChecks(client, root);
+          const sftpFindings = await runWordpressSftpChecks(
+            client,
+            effectiveRoot,
+          );
           findings.push(
             ...(scope === "updates"
               ? sftpFindings.filter((f) => f.type === "update_core")
@@ -534,50 +659,21 @@ async function collectLive(
           const inv = await collectWordpressInventory({
             siteUrl: site.url,
             api: secrets.api,
-            sftp: { client, root },
+            sftp: { client, root: effectiveRoot },
           });
           Object.assign(inventory, inv);
           inventory.ssl = inventory.ssl ?? { https };
           if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
           if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
+          if (inventory.fsRoot) effectiveRoot = inventory.fsRoot;
         }
       } else {
         if (scope === "full" || scope === "integrity") {
-          const { listRecursive, readTextFile } = await import("../sftp/client");
-          const { scanTextContent } = await import("./malware-patterns");
-          progress.setCurrent("Scan malware images/tmp…");
-          for (const dir of [`${root}/images`, `${root}/tmp`]) {
-            let files: string[] = [];
-            try {
-              files = await listRecursive(client, dir, 200);
-            } catch {
-              continue;
-            }
-            for (const file of files
-              .filter((f) => f.toLowerCase().endsWith(".php"))
-              .slice(0, 40)) {
-              try {
-                const content = await readTextFile(client, file);
-                for (const hit of scanTextContent(content, file)) {
-                  findings.push({
-                    type: "malware",
-                    severity: hit.severity,
-                    title: `File sospetto: ${file.split("/").pop()}`,
-                    description: hit.description,
-                    evidence: { filePath: file, patternId: hit.patternId },
-                    proposedPlan: {
-                      summary: `Rimuovere ${file}`,
-                      steps: ["Backup", "Delete SFTP", "Rescan"],
-                      risk: hit.severity as "medium" | "high" | "critical",
-                      requiresBackup: true,
-                    },
-                  });
-                }
-              } catch {
-                /* skip */
-              }
-            }
-          }
+          const { runJoomlaSftpChecks } = await import("./checks/sftp-joomla");
+          progress.setCurrent("Check integrity Joomla…");
+          findings.push(
+            ...(await runJoomlaSftpChecks(client, effectiveRoot)),
+          );
         }
 
         if (scopeHas(scope, "inventory") || scope === "updates" || scope === "integrity") {
@@ -586,12 +682,38 @@ async function collectLive(
           const inv = await collectJoomlaInventory({
             siteUrl: site.url,
             api: secrets.api,
-            sftp: { client, root },
+            sftp: { client, root: effectiveRoot },
           });
           Object.assign(inventory, inv);
           inventory.ssl = inventory.ssl ?? { https };
           if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
           if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
+          if (inventory.fsRoot) effectiveRoot = inventory.fsRoot;
+        }
+      }
+
+      // Persisti root corretta se diversa da quella salvata
+      if (
+        inventory.fsRoot &&
+        secrets.sftp &&
+        inventory.fsRoot !== secrets.sftp.rootPath
+      ) {
+        try {
+          const { encryptSecrets } = await import("../crypto");
+          const nextSecrets = {
+            ...secrets,
+            sftp: { ...secrets.sftp, rootPath: inventory.fsRoot },
+          };
+          await prisma.site.update({
+            where: { id: site.id },
+            data: { secretsEnc: encryptSecrets(nextSecrets) },
+          });
+          secrets.sftp.rootPath = inventory.fsRoot;
+          inventory.notes?.push(
+            `RootPath salvata aggiornata → ${inventory.fsRoot}`,
+          );
+        } catch {
+          /* non bloccare lo scan */
         }
       }
 
@@ -599,16 +721,41 @@ async function collectLive(
         const extCount =
           inventory.plugins.length +
           inventory.extensions.length +
+          inventory.themes.length +
           (inventory.modules?.length ?? 0);
         progress.done(
           "inventory",
           inventory.coreVersion
-            ? `${inventory.cms} ${inventory.coreVersion} · ${extCount} estensioni`
-            : `${extCount} estensioni`,
+            ? `${inventory.cms} ${inventory.coreVersion} · ${extCount} elementi`
+            : `${extCount} elementi · root ${inventory.fsRoot ?? "—"}`,
         );
       }
     });
-  } else if (secrets?.api && (scopeHas(scope, "inventory") || scope === "updates")) {
+  }
+
+  if (scopeHas(scope, "php") && !phpFinalized) {
+    if (!inventory.phpVersion) {
+      inventory.notes = (inventory.notes ?? []).filter(
+        (n) => !/PHP: versione non rilevata/i.test(n),
+      );
+      inventory.notes?.push(
+        "PHP: versione non rilevata dopo header e tentativo FTP/SFTP.",
+      );
+    }
+    progress.done(
+      "php",
+      inventory.phpVersion
+        ? `PHP ${inventory.phpVersion}`
+        : "PHP non rilevato",
+    );
+    phpFinalized = true;
+  }
+
+  if (
+    secrets?.api &&
+    !secrets.sftp &&
+    (scopeHas(scope, "inventory") || scope === "updates")
+  ) {
     if (scopeHas(scope, "sftp")) progress.skip("sftp", "Solo API");
     progress.start("inventory", "Inventario via API…");
     if (site.cms === "wordpress") {
@@ -630,11 +777,9 @@ async function collectLive(
     }
     inventory.ssl = inventory.ssl ?? { https };
     progress.done("inventory", "Inventario API completato");
-  } else if (needsCreds && secrets) {
-    if (scopeHas(scope, "sftp") && !secrets.sftp) {
-      progress.skip("sftp", "SFTP non configurato");
-    }
-    if (scopeHas(scope, "inventory") && !secrets.sftp && !secrets.api) {
+  } else if (needsCreds && secrets && !secrets.sftp) {
+    if (scopeHas(scope, "sftp")) progress.skip("sftp", "SFTP non configurato");
+    if (scopeHas(scope, "inventory") && !secrets.api) {
       progress.skip("inventory", "Nessuna fonte inventario");
     }
   }
@@ -676,9 +821,23 @@ async function collectLive(
   return { findings, inventory };
 }
 
+function uniqueProbeRoots(...roots: string[]): string[] {
+  const out: string[] = [];
+  for (const r of roots) {
+    const v = (r || ".").replace(/\/$/, "") || ".";
+    if (!out.includes(v)) out.push(v);
+    for (const leaf of ["httpdocs", "public_html", "www", "web", "public"]) {
+      const p = v === "." ? leaf : `${v}/${leaf}`;
+      if (!out.includes(p)) out.push(p);
+    }
+  }
+  return out;
+}
+
 async function runPhpAdvisoryCheck(
   siteUrl: string,
   inventory: SiteInventory,
+  opts?: { deferMissingNote?: boolean },
 ): Promise<ScanFinding[]> {
   const {
     detectPhpFromHttp,
@@ -695,14 +854,17 @@ async function runPhpAdvisoryCheck(
             | "header"
             | "sftp"
             | "composer"
+            | "probe"
             | "unknown",
         }
       : null);
 
   if (!hit) {
-    inventory.notes?.push(
-      "PHP: versione non rilevata (header X-Powered-By assente). Prova SFTP o abilita esposizione controllata in staging.",
-    );
+    if (!opts?.deferMissingNote) {
+      inventory.notes?.push(
+        "PHP: versione non rilevata (header X-Powered-By assente). Prova SFTP o abilita esposizione controllata in staging.",
+      );
+    }
     return [];
   }
 

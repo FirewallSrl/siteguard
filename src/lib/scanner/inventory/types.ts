@@ -19,7 +19,7 @@ export type SiteInventory = {
   /** Quanti elementi (core + estensioni) hanno un update disponibile */
   updatesPending?: number;
   phpVersion?: string;
-  phpSource?: "header" | "sftp" | "composer" | "unknown";
+  phpSource?: "header" | "sftp" | "composer" | "probe" | "unknown";
   /** Advisory PHP aperti (ACN / php.net) rispetto alla versione rilevata */
   phpAdvisories?: Array<{
     id: string;
@@ -58,4 +58,6 @@ export type SiteInventory = {
   };
   notes?: string[];
   source: Array<"sftp" | "api" | "public">;
+  /** Docroot CMS effettivamente usata (può differire da rootPath salvata) */
+  fsRoot?: string;
 };

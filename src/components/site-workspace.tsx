@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   Check,
   KeyRound,
@@ -75,9 +76,27 @@ export function SiteWorkspace({
   hasScanned: boolean;
   defaultTab?: TabId;
 }) {
+  const router = useRouter();
   const [tab, setTab] = useState<TabId>(
     !hasSecrets ? "accessi" : defaultTab === "accessi" ? "panoramica" : defaultTab,
   );
+
+  useEffect(() => {
+    if (!hasSecrets) {
+      setTab("accessi");
+      return;
+    }
+    setTab(defaultTab === "accessi" ? "panoramica" : defaultTab);
+  }, [defaultTab, hasSecrets, siteId]);
+
+  function openTab(next: TabId) {
+    setTab(next);
+    if (next === "accessi") {
+      router.replace(`/sites/${siteId}?tab=accessi`, { scroll: false });
+      return;
+    }
+    router.replace(`/sites/${siteId}?tab=${next}`, { scroll: false });
+  }
 
   const done = useMemo(
     () => ({
@@ -156,7 +175,7 @@ export function SiteWorkspace({
                   className="flow-rail-step"
                   data-active={isActive || undefined}
                   data-done={!isActive && isDone ? true : undefined}
-                  onClick={() => setTab(step.id)}
+                  onClick={() => openTab(step.id)}
                 >
                   <span className="flow-rail-icon">
                     {isDone && !isActive ? (
@@ -188,7 +207,7 @@ export function SiteWorkspace({
           type="button"
           className="access-secondary"
           data-active={tab === "accessi" || undefined}
-          onClick={() => setTab("accessi")}
+          onClick={() => openTab("accessi")}
           title="Credenziali SFTP / API"
         >
           <Settings2 className="h-3.5 w-3.5" strokeWidth={2} />
@@ -209,7 +228,7 @@ export function SiteWorkspace({
             <button
               type="button"
               className="btn-primary shrink-0"
-              onClick={() => setTab(next.tab!)}
+              onClick={() => openTab(next.tab!)}
             >
               {next.cta}
             </button>
@@ -231,7 +250,7 @@ export function SiteWorkspace({
           <SiteInventoryView
             inventoryJson={inventoryJson}
             findingsCount={findingsCount}
-            onOpenRemediation={() => setTab("finding")}
+            onOpenRemediation={() => openTab("finding")}
           />
         )}
         {tab === "finding" && findingsSlot}

@@ -60,7 +60,7 @@ export const PHP_ADVISORIES: PhpAdvisory[] = [
 
 export type PhpVersionHit = {
   version: string;
-  source: "header" | "sftp" | "composer" | "unknown";
+  source: "header" | "sftp" | "composer" | "probe" | "unknown";
 };
 
 export type PhpAdvisoryHit = {
@@ -144,70 +144,283 @@ export function findingsFromPhpHits(
   });
 }
 
-/** Rileva versione PHP da header HTTP pubblici. */
+/** Rileva versione PHP da header HTTP pubblici (homepage + endpoint tipici). */
 export async function detectPhpFromHttp(
   siteUrl: string,
 ): Promise<PhpVersionHit | null> {
-  try {
-    const res = await fetch(siteUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "User-Agent": "SiteGuard/0.1 (+php-version-check)",
-        Accept: "text/html,*/*",
-      },
-      signal: AbortSignal.timeout(12_000),
-    });
-    const powered = res.headers.get("x-powered-by") ?? "";
-    const server = res.headers.get("server") ?? "";
-    const fromPowered = powered.match(/PHP\/(\d+\.\d+(?:\.\d+)?)/i)?.[1];
-    if (fromPowered) return { version: fromPowered, source: "header" };
-    const fromServer = server.match(/PHP\/(\d+\.\d+(?:\.\d+)?)/i)?.[1];
-    if (fromServer) return { version: fromServer, source: "header" };
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-/** Hint da filesystem (composer.json / .php-version). */
-export async function detectPhpFromSftp(
-  readText: (path: string) => Promise<string>,
-  root: string,
-): Promise<PhpVersionHit | null> {
-  const candidates = [
-    `${root}/.php-version`,
-    `${root}/composer.json`,
-    `${root}/../composer.json`,
+  const base = siteUrl.replace(/\/$/, "");
+  const urls = [
+    base,
+    `${base}/index.php`,
+    `${base}/administrator/index.php`,
+    `${base}/wp-login.php`,
+    `${base}/api/index.php`,
   ];
-  for (const path of candidates) {
+
+  for (const url of urls) {
     try {
-      const text = await readText(path);
-      if (path.endsWith(".php-version")) {
-        const v = text.trim().match(/(\d+\.\d+(?:\.\d+)?)/)?.[1];
-        if (v) return { version: v, source: "sftp" };
-      }
-      if (path.endsWith("composer.json")) {
-        const json = JSON.parse(text) as {
-          config?: { platform?: { php?: string } };
-          require?: { php?: string };
-        };
-        const platform = json.config?.platform?.php;
-        if (platform) {
-          const v = platform.match(/(\d+\.\d+(?:\.\d+)?)/)?.[1];
-          if (v) return { version: v, source: "composer" };
-        }
-        const req = json.require?.php;
-        if (req) {
-          const v = req.match(/(\d+\.\d+(?:\.\d+)?)/)?.[1];
-          if (v) return { version: v, source: "composer" };
-        }
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+          "User-Agent": "SiteGuard/0.2 (+php-version-check)",
+          Accept: "text/html,*/*",
+        },
+        signal: AbortSignal.timeout(10_000),
+        cache: "no-store",
+      });
+      const fromHeaders = versionFromHeaders(res.headers);
+      if (fromHeaders) return { version: fromHeaders, source: "header" };
+
+      // Alcuni reverse-proxy lasciano la versione solo su 404 PHP
+      if (res.status >= 400) {
+        const again = versionFromHeaders(res.headers);
+        if (again) return { version: again, source: "header" };
       }
     } catch {
       /* next */
     }
   }
   return null;
+}
+
+function versionFromHeaders(headers: Headers): string | null {
+  const powered = headers.get("x-powered-by") ?? "";
+  const server = headers.get("server") ?? "";
+  const via = headers.get("via") ?? "";
+  const blob = `${powered}\n${server}\n${via}`;
+  return blob.match(/PHP\/(\d+\.\d+(?:\.\d+)?)/i)?.[1] ?? null;
+}
+
+function parsePhpVersion(text: string): string | null {
+  return text.trim().match(/(\d+\.\d+(?:\.\d+)?)/)?.[1] ?? null;
+}
+
+function joinRoot(root: string, rel: string): string {
+  const base = root.replace(/\/$/, "") || ".";
+  const leaf = rel.replace(/^\//, "");
+  if (!leaf) return base;
+  if (base === ".") return leaf;
+  return `${base}/${leaf}`;
+}
+
+/** Hint da filesystem (composer, .php-version, lock, hosting). */
+export async function detectPhpFromSftp(
+  readText: (path: string) => Promise<string>,
+  root: string,
+): Promise<PhpVersionHit | null> {
+  const bases = uniqueStrings([
+    root.replace(/\/$/, "") || ".",
+    joinRoot(root, "httpdocs"),
+    joinRoot(root, "public_html"),
+    joinRoot(root, "www"),
+    joinRoot(root, "web"),
+    joinRoot(root, "public"),
+  ]);
+
+  const relFiles: Array<{
+    rel: string;
+    kind: "version-file" | "composer" | "lock" | "ini";
+  }> = [
+    { rel: ".php-version", kind: "version-file" },
+    { rel: ".phpenv/version", kind: "version-file" },
+    { rel: "composer.json", kind: "composer" },
+    { rel: "composer.lock", kind: "lock" },
+    { rel: ".user.ini", kind: "ini" },
+    { rel: "php.ini", kind: "ini" },
+    { rel: "../.php-version", kind: "version-file" },
+    { rel: "../composer.json", kind: "composer" },
+    { rel: "../composer.lock", kind: "lock" },
+  ];
+
+  for (const base of bases) {
+    for (const item of relFiles) {
+      try {
+        const text = await readText(joinRoot(base, item.rel));
+        if (item.kind === "version-file") {
+          const v = parsePhpVersion(text);
+          if (v) return { version: v, source: "sftp" };
+        }
+        if (item.kind === "ini") {
+          // raramente contiene la versione, ma alcuni hosting annotano
+          const v =
+            text.match(/^\s*;\s*PHP\s+(\d+\.\d+(?:\.\d+)?)/im)?.[1] ??
+            text.match(/php[_-]?version\s*=\s*["']?(\d+\.\d+(?:\.\d+)?)/i)?.[1];
+          if (v) return { version: v, source: "sftp" };
+        }
+        if (item.kind === "composer") {
+          const json = JSON.parse(text) as {
+            config?: { platform?: { php?: string } };
+            require?: { php?: string };
+          };
+          const platform = json.config?.platform?.php;
+          if (platform) {
+            const v = parsePhpVersion(platform);
+            if (v) return { version: v, source: "composer" };
+          }
+          const req = json.require?.php;
+          if (req) {
+            const v = parsePhpVersion(req);
+            if (v) return { version: v, source: "composer" };
+          }
+        }
+        if (item.kind === "lock") {
+          const json = JSON.parse(text) as {
+            platform?: { php?: string };
+            "platform-dev"?: { php?: string };
+          };
+          const platform = json.platform?.php ?? json["platform-dev"]?.php;
+          if (platform) {
+            const v = parsePhpVersion(platform);
+            if (v) return { version: v, source: "composer" };
+          }
+        }
+      } catch {
+        /* next */
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Probe sicuro: scrive un PHP monouso in più path web-accessibili,
+ * lo richiama in HTTP, legge PHP_VERSION e cancella subito.
+ * Evita file "dot" (spesso bloccati da Apache/nginx).
+ */
+export async function detectPhpViaRemoteProbe(input: {
+  siteUrl: string;
+  root: string;
+  put: (path: string, data: string) => Promise<void>;
+  del: (path: string) => Promise<void>;
+  /** Opzionale: verifica se una cartella è listabile prima del put */
+  canList?: (path: string) => Promise<boolean>;
+}): Promise<PhpVersionHit | null> {
+  const token = `sg${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  // Niente leading dot: molti hosting bloccano .*.php
+  const fileName = `sg-php-${token}.php`;
+  const marker = `SGPHP|${token}|`;
+  const body =
+    "<?php header('Content-Type: text/plain; charset=utf-8');" +
+    "header('X-Robots-Tag: noindex, nofollow');" +
+    "header('Cache-Control: no-store');" +
+    `echo '${marker}'.PHP_VERSION;`;
+
+  const root = input.root.replace(/\/$/, "") || ".";
+  const siteBase = input.siteUrl.replace(/\/$/, "");
+
+  // Cartelle tipiche Joomla/WP/hosting dove l'esecuzione PHP è spesso consentita
+  const dirCandidates = uniqueStrings([
+    "",
+    "tmp",
+    "images",
+    "media",
+    "cache",
+    "httpdocs",
+    "public_html",
+    "www",
+    "web",
+    "public",
+    "httpdocs/tmp",
+    "public_html/tmp",
+    "tmp/regularlabs",
+  ]);
+
+  for (const dir of dirCandidates) {
+    const remoteDir = dir ? joinRoot(root, dir) : root;
+    if (input.canList) {
+      const ok = await input.canList(remoteDir).catch(() => false);
+      if (!ok && dir !== "") continue;
+    }
+
+    const remotePath = joinRoot(remoteDir, fileName);
+    try {
+      await input.put(remotePath, body);
+    } catch {
+      continue;
+    }
+
+    try {
+      const urlDirs = uniqueStrings([
+        dir,
+        // se abbiamo scritto in httpdocs/tmp ma l'URL è /tmp
+        dir.replace(/^(httpdocs|public_html|www|web|public)\//, ""),
+        dir.replace(/^(httpdocs|public_html|www|web|public)$/, ""),
+      ]).filter((d) => !/^(httpdocs|public_html|www|web|public)$/i.test(d));
+
+      const urls: string[] = [];
+      for (const ud of urlDirs) {
+        const path = ud ? `${ud}/${fileName}` : fileName;
+        urls.push(`${siteBase}/${path}`);
+        urls.push(`${siteBase}/${path}?t=${token}`);
+      }
+      // fallback assoluti tipici
+      urls.push(`${siteBase}/${fileName}`);
+      urls.push(`${siteBase}/tmp/${fileName}`);
+      urls.push(`${siteBase}/images/${fileName}`);
+      urls.push(`${siteBase}/media/${fileName}`);
+
+      for (const url of uniqueStrings(urls)) {
+        const hit = await fetchProbeVersion(url, marker);
+        if (hit) return hit;
+      }
+    } finally {
+      await input.del(remotePath).catch(() => undefined);
+    }
+  }
+
+  return null;
+}
+
+async function fetchProbeVersion(
+  url: string,
+  marker: string,
+): Promise<PhpVersionHit | null> {
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      cache: "no-store",
+      headers: {
+        "User-Agent": "SiteGuard/0.2 (+php-probe)",
+        Accept: "text/plain,*/*",
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+
+    const fromHeaders = versionFromHeaders(res.headers);
+    const text = (await res.text()).trim();
+
+    // Formato atteso: SGPHP|token|8.2.28
+    if (text.includes(marker)) {
+      const after = text.split(marker)[1] ?? "";
+      const v = parsePhpVersion(after.split(/[\s<]/)[0] ?? after);
+      if (v) return { version: v, source: "probe" };
+    }
+
+    // Risposta pulita solo versione
+    if (res.ok) {
+      const v = parsePhpVersion(text);
+      if (v && /^[\d.]+$/.test(text.trim())) {
+        return { version: v, source: "probe" };
+      }
+    }
+
+    // Header X-Powered-By comparso sulla risposta del probe
+    if (fromHeaders) return { version: fromHeaders, source: "probe" };
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function uniqueStrings(items: string[]): string[] {
+  const out: string[] = [];
+  for (const item of items) {
+    const v = item.replace(/^\/+|\/+$/g, "");
+    if (!out.includes(v)) out.push(v);
+  }
+  return out;
 }
 
 /**

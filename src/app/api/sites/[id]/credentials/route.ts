@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { decryptSecrets, encryptSecrets } from "@/lib/crypto";
-import { mergeSecrets, toSecretsMeta } from "@/lib/secrets/safe";
+import {
+  mergeSecrets,
+  sanitizeErrorMessage,
+  toSecretsMeta,
+} from "@/lib/secrets/safe";
+import { applyDiscovery, discoverSftp } from "@/lib/sftp/discover";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -56,7 +61,43 @@ export async function PATCH(req: Request, { params }: Params) {
     }
 
     const current = site.secretsEnc ? decryptSecrets(site.secretsEnc) : null;
-    const merged = mergeSecrets(current, body);
+    let merged = mergeSecrets(current, body);
+    let discovery:
+      | {
+          protocol: string;
+          port: number;
+          rootPath: string;
+          cms: string;
+          triedPorts: number[];
+        }
+      | undefined;
+    let cms = site.cms;
+
+    if (merged.sftp && (merged.sftp.password || merged.sftp.privateKey)) {
+      try {
+        const found = await discoverSftp(merged.sftp);
+        merged = {
+          ...merged,
+          sftp: applyDiscovery(merged.sftp, found),
+        };
+        if (found.cms !== "unknown") cms = found.cms;
+        discovery = {
+          protocol: found.protocol,
+          port: found.port,
+          rootPath: found.rootPath,
+          cms: found.cms,
+          triedPorts: found.triedPorts,
+        };
+      } catch (err) {
+        return NextResponse.json(
+          {
+            error: `SFTP/FTP non raggiungibile: ${sanitizeErrorMessage(err)}`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     const secretsEnc =
       merged.sftp || merged.api ? encryptSecrets(merged) : null;
 
@@ -64,6 +105,7 @@ export async function PATCH(req: Request, { params }: Params) {
       where: { id },
       data: {
         secretsEnc,
+        cms,
         status: secretsEnc ? "connected" : "pending",
       },
     });
@@ -77,7 +119,7 @@ export async function PATCH(req: Request, { params }: Params) {
           touchedApi: Boolean(body.api),
           clearedSftp: Boolean(body.sftp?.clear),
           clearedApi: Boolean(body.api?.clear),
-          // mai password / chiavi
+          discovery: discovery ?? null,
         }),
       },
     });
@@ -86,7 +128,9 @@ export async function PATCH(req: Request, { params }: Params) {
     return NextResponse.json({
       ok: true,
       status: updated.status,
+      cms: updated.cms,
       meta: toSecretsMeta(secrets),
+      discovery: discovery ?? null,
     });
   } catch (err) {
     if (err instanceof z.ZodError) {

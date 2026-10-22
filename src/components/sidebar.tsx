@@ -105,9 +105,10 @@ export function Sidebar({ sites = [] }: { sites?: SidebarSite[] }) {
           ) : (
             <ul className="sidebar-sites-list">
               {sites.map((site) => {
-                const href = `/sites/${site.id}`;
+                const href = `/sites/${site.id}?tab=panoramica`;
                 const active =
-                  pathname === href || pathname.startsWith(`${href}/`);
+                  pathname === `/sites/${site.id}` ||
+                  pathname.startsWith(`/sites/${site.id}/`);
                 return (
                   <li key={site.id}>
                     <Link

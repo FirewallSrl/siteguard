@@ -51,11 +51,10 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
     const body: Record<string, unknown> = {};
 
     if (sftpHost || meta?.hasSftp) {
+      setMessage("Rilevo porta, root e CMS…");
       body.sftp = {
         host: sftpHost || meta?.sftp?.host,
-        port: Number(fd.get("sftpPort") || meta?.sftp?.port || 22),
         username: String(fd.get("sftpUser") || meta?.sftp?.username || ""),
-        rootPath: String(fd.get("sftpRoot") || meta?.sftp?.rootPath || "/public_html"),
         password: String(fd.get("sftpPassword") || ""),
         privateKey: String(fd.get("sftpKey") || ""),
       };
@@ -77,8 +76,19 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Salvataggio fallito");
       setMeta(data.meta);
-      setMessage("Credenziali aggiornate (cifrate at rest).");
-      // svuota campi password dopo save
+      const d = data.discovery as
+        | {
+            protocol?: string;
+            port?: number;
+            rootPath?: string;
+            cms?: string;
+          }
+        | undefined;
+      setMessage(
+        d
+          ? `Salvato · ${(d.protocol ?? "sftp").toUpperCase()} :${d.port} · ${d.rootPath} · ${d.cms ?? "cms?"}`
+          : "Credenziali aggiornate (cifrate at rest).",
+      );
       e.currentTarget.reset();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Errore");
@@ -100,6 +110,10 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Test fallito");
       setTest(data);
+      await loadMeta();
+      if (data.sftp?.ok) {
+        setMessage(data.sftp.message);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Errore");
     } finally {
@@ -175,23 +189,26 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
               </span>
             )}
           </div>
+          {meta?.sftp && (
+            <p className="text-xs text-[var(--muted)]">
+              Rilevato:{" "}
+              <strong className="text-[var(--ink)]">
+                {meta.sftp.protocol.toUpperCase()}
+              </strong>
+              {" · porta "}
+              <strong className="text-[var(--ink)]">{meta.sftp.port}</strong>
+              {" · root "}
+              <strong className="text-[var(--ink)]">{meta.sftp.rootPath}</strong>
+            </p>
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block text-sm text-[var(--muted)]">
+            <label className="block text-sm text-[var(--muted)] sm:col-span-2">
               Host
               <input
                 name="sftpHost"
                 className="field"
                 defaultValue={meta?.sftp?.host ?? ""}
                 placeholder="ftp.esempio.it"
-              />
-            </label>
-            <label className="block text-sm text-[var(--muted)]">
-              Porta
-              <input
-                name="sftpPort"
-                type="number"
-                className="field"
-                defaultValue={meta?.sftp?.port ?? 22}
               />
             </label>
             <label className="block text-sm text-[var(--muted)]">
@@ -218,19 +235,10 @@ export function CredentialsPanel({ siteId }: { siteId: string }) {
               />
             </label>
           </div>
-          <label className="block text-sm text-[var(--muted)]">
-            Root path
-            <input
-              name="sftpRoot"
-              className="field"
-              defaultValue={meta?.sftp?.rootPath ?? "httpdocs"}
-              placeholder="httpdocs (senza / iniziale su Plesk)"
-            />
-            <span className="mt-1 block text-xs text-[var(--muted)]">
-              Su Plesk usa spesso <code>httpdocs</code> o <code>public_html</code>{" "}
-              relativi — non <code>/httpdocs</code> assoluto.
-            </span>
-          </label>
+          <p className="text-xs text-[var(--muted)]">
+            Al salvataggio/test sondiamo le porte aperte e proviamo SFTP, FTP e
+            FTPS; poi individuiamo root e CMS (WordPress/Joomla).
+          </p>
           <label className="block text-sm text-[var(--muted)]">
             Chiave privata (opzionale, alternativa alla password)
             <textarea

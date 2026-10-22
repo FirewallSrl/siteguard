@@ -1,6 +1,6 @@
-import type SftpClient from "ssh2-sftp-client";
+import type { RemoteFsClient } from "../../sftp/client";
 import type { ScanFinding } from "../types";
-import { scanTextContent } from "../malware-patterns";
+import { isRiskyPath, scanTextContent } from "../malware-patterns";
 import { listRecursive, readTextFile } from "../../sftp/client";
 
 function planDelete(filePath: string, risk: ScanFinding["proposedPlan"]["risk"]): ScanFinding["proposedPlan"] {
@@ -13,7 +13,7 @@ function planDelete(filePath: string, risk: ScanFinding["proposedPlan"]["risk"])
 }
 
 export async function runWordpressSftpChecks(
-  client: SftpClient,
+  client: RemoteFsClient,
   root: string,
 ): Promise<ScanFinding[]> {
   const findings: ScanFinding[] = [];
@@ -109,15 +109,21 @@ export async function runWordpressSftpChecks(
   // --- .htaccess ---
   try {
     const ht = await readTextFile(client, `${base}/.htaccess`);
-    const hits = scanTextContent(ht, `${base}/.htaccess`);
+    const hits = scanTextContent(ht, `${base}/.htaccess`, {
+      riskyLocation: true,
+    });
     for (const hit of hits) {
       findings.push({
         type: "malware",
         severity: hit.severity,
         title: ".htaccess sospetto",
         description: hit.description,
-        evidence: { filePath: hit.filePath, patternId: hit.patternId },
-        proposedPlan: planDelete(hit.filePath, hit.severity as "medium" | "high" | "critical"),
+        evidence: {
+          filePath: hit.filePath,
+          patternId: hit.patternId,
+          weight: hit.weight,
+        },
+        proposedPlan: planDelete(hit.filePath, hit.severity),
       });
     }
     if (/RewriteRule[\s\S]{0,120}https?:\/\/(?!www\.)[^\s]+/i.test(ht)) {
@@ -139,29 +145,33 @@ export async function runWordpressSftpChecks(
     /* assente */
   }
 
-  // --- PHP in uploads + root suspicious ---
+  // --- PHP in path rischiosi ---
   const scanDirs = [
     `${base}/wp-content/uploads`,
     `${base}/wp-content/cache`,
     `${base}/wp-content/upgrade`,
+    `${base}/wp-content/mu-plugins`,
+    `${base}/.well-known`,
   ];
 
   for (const dir of scanDirs) {
     let files: string[] = [];
     try {
-      files = await listRecursive(client, dir, 800);
+      files = await listRecursive(client, dir, 1200);
     } catch {
       continue;
     }
-    const phpFiles = files.filter((f) => f.toLowerCase().endsWith(".php"));
-    if (dir.includes("/uploads") && phpFiles.length > 0) {
+    const phpFiles = files.filter((f) => /\.php$/i.test(f));
+    const inUploads = /\/uploads/i.test(dir);
+
+    if (inUploads && phpFiles.length > 0) {
       findings.push({
         type: "malware",
         severity: "high",
         title: `${phpFiles.length} file PHP in uploads`,
         description:
           "In uploads non dovrebbero esserci PHP eseguibili (spesso backdoor).",
-        evidence: { sample: phpFiles.slice(0, 15), count: phpFiles.length },
+        evidence: { sample: phpFiles.slice(0, 20), count: phpFiles.length },
         proposedPlan: {
           summary: "Rimuovere PHP da uploads dopo analisi",
           steps: [
@@ -175,21 +185,24 @@ export async function runWordpressSftpChecks(
       });
     }
 
-    for (const file of phpFiles.slice(0, 80)) {
+    for (const file of phpFiles.slice(0, 150)) {
       try {
         const content = await readTextFile(client, file);
-        const hits = scanTextContent(content, file);
-        for (const hit of hits) {
+        const hits = scanTextContent(content, file, {
+          riskyLocation: isRiskyPath(file) || inUploads,
+        });
+        for (const hit of hits.filter((h) => h.weight >= 5 || inUploads)) {
           findings.push({
             type: "malware",
             severity: hit.severity,
             title: `File sospetto: ${file.split("/").pop()}`,
             description: hit.description,
-            evidence: { filePath: file, patternId: hit.patternId },
-            proposedPlan: planDelete(
-              file,
-              hit.severity as "medium" | "high" | "critical",
-            ),
+            evidence: {
+              filePath: file,
+              patternId: hit.patternId,
+              weight: hit.weight,
+            },
+            proposedPlan: planDelete(file, hit.severity),
           });
         }
       } catch {
@@ -198,31 +211,27 @@ export async function runWordpressSftpChecks(
     }
   }
 
-  // --- Drop-in sospetti in wp-content root ---
+  // --- Drop-in / PHP in wp-content root ---
   try {
     const entries = await client.list(`${base}/wp-content`);
     for (const entry of entries) {
-      if (entry.type !== "-" || !entry.name.toLowerCase().endsWith(".php")) {
-        continue;
-      }
-      if (["index.php", "object-cache.php", "advanced-cache.php", "db.php", "sunrise.php"].includes(entry.name)) {
-        // drop-in legittimi: li scansiamo comunque per pattern
-      }
+      if (entry.type !== "-" || !/\.php$/i.test(entry.name)) continue;
       const full = `${base}/wp-content/${entry.name}`;
       try {
         const content = await readTextFile(client, full);
-        const hits = scanTextContent(content, full);
-        for (const hit of hits) {
+        const hits = scanTextContent(content, full, { riskyLocation: true });
+        for (const hit of hits.filter((h) => h.weight >= 5)) {
           findings.push({
             type: "malware",
             severity: hit.severity,
             title: `Drop-in sospetto: ${entry.name}`,
             description: hit.description,
-            evidence: { filePath: full, patternId: hit.patternId },
-            proposedPlan: planDelete(
-              full,
-              hit.severity as "medium" | "high" | "critical",
-            ),
+            evidence: {
+              filePath: full,
+              patternId: hit.patternId,
+              weight: hit.weight,
+            },
+            proposedPlan: planDelete(full, hit.severity),
           });
         }
       } catch {
@@ -233,7 +242,63 @@ export async function runWordpressSftpChecks(
     /* skip */
   }
 
-  // --- Sample core integrity (pochi file chiave) ---
+  // --- Root site: PHP non standard ---
+  try {
+    const entries = await client.list(base);
+    const allowRoot = new Set([
+      "index.php",
+      "wp-config.php",
+      "wp-login.php",
+      "wp-settings.php",
+      "wp-cron.php",
+      "wp-load.php",
+      "wp-blog-header.php",
+      "wp-comments-post.php",
+      "wp-activate.php",
+      "wp-signup.php",
+      "wp-trackback.php",
+      "xmlrpc.php",
+    ]);
+    for (const entry of entries) {
+      if (entry.type !== "-" || !/\.php$/i.test(entry.name)) continue;
+      if (allowRoot.has(entry.name)) continue;
+      const full = `${base}/${entry.name}`;
+      findings.push({
+        type: "malware",
+        severity: "high",
+        title: `PHP non standard in root: ${entry.name}`,
+        description:
+          "File PHP inatteso nella root WordPress — verificare se legittimo.",
+        evidence: { filePath: full },
+        proposedPlan: planDelete(full, "high"),
+      });
+      try {
+        const content = await readTextFile(client, full);
+        for (const hit of scanTextContent(content, full, {
+          riskyLocation: true,
+        })) {
+          findings.push({
+            type: "malware",
+            severity: hit.severity,
+            title: `Root sospetta: ${entry.name}`,
+            description: hit.description,
+            evidence: {
+              filePath: full,
+              patternId: hit.patternId,
+              weight: hit.weight,
+            },
+            proposedPlan: planDelete(full, hit.severity),
+          });
+        }
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    /* skip */
+  }
+
+  // --- Integrità core (sample ampliato) ---
   try {
     const versionPhp = await readTextFile(
       client,
@@ -247,7 +312,14 @@ export async function runWordpressSftpChecks(
           "wp-includes/version.php",
           "wp-login.php",
           "wp-settings.php",
+          "wp-load.php",
+          "wp-includes/functions.php",
+          "wp-includes/class-wp.php",
+          "wp-admin/admin.php",
+          "wp-admin/includes/file.php",
         ];
+        let mismatches = 0;
+        const evidenceFiles: Array<Record<string, string>> = [];
         for (const rel of samples) {
           const expected = checksums[rel];
           if (!expected) continue;
@@ -256,6 +328,8 @@ export async function runWordpressSftpChecks(
             const crypto = await import("crypto");
             const actual = crypto.createHash("md5").update(buf).digest("hex");
             if (actual !== expected) {
+              mismatches += 1;
+              evidenceFiles.push({ file: rel, expected, actual });
               findings.push({
                 type: "malware",
                 severity: "critical",
@@ -278,6 +352,27 @@ export async function runWordpressSftpChecks(
           } catch {
             /* skip file */
           }
+        }
+        if (mismatches >= 2) {
+          findings.push({
+            type: "malware",
+            severity: "critical",
+            title: `Core WordPress compromesso (${mismatches} file)`,
+            description:
+              "Più file core non corrispondono ai checksum ufficiali — ripristino core consigliato.",
+            evidence: { version: match[1], mismatches, files: evidenceFiles },
+            proposedPlan: {
+              summary: "Reinstallare i file core da WordPress.org",
+              steps: [
+                "Backup completo",
+                "Sostituire wp-admin e wp-includes da pacchetto ufficiale",
+                "Non sovrascrivere wp-config.php / wp-content",
+                "Rescan integrity",
+              ],
+              risk: "critical",
+              requiresBackup: true,
+            },
+          });
         }
       }
     }

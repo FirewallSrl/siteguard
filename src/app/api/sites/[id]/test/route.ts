@@ -27,6 +27,7 @@ export async function POST(req: Request, { params }: Params) {
   }
 
   const result = await testSiteConnection({
+    siteId: site.id,
     siteUrl: site.url,
     cms: site.cms,
     secretsEnc: site.secretsEnc,

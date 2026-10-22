@@ -1,11 +1,10 @@
-import type SftpClient from "ssh2-sftp-client";
 import type { ApiCredentials } from "../../types";
 import {
   fetchWpPlugins,
   fetchWpThemes,
   fetchWpUsers,
 } from "../../cms/wordpress";
-import { readTextFile } from "../../sftp/client";
+import { readTextFile, type RemoteFsClient } from "../../sftp/client";
 import type { InventoryExtension, SiteInventory } from "./types";
 
 function emptyInventory(): SiteInventory {
@@ -23,7 +22,7 @@ function emptyInventory(): SiteInventory {
 export async function collectWordpressInventory(input: {
   siteUrl: string;
   api?: ApiCredentials;
-  sftp?: { client: SftpClient; root: string };
+  sftp?: { client: RemoteFsClient; root: string };
 }): Promise<SiteInventory> {
   const inv = emptyInventory();
 
@@ -91,7 +90,7 @@ async function collectFromApi(
 }
 
 async function collectFromSftp(
-  client: SftpClient,
+  client: RemoteFsClient,
   root: string,
   inv: SiteInventory,
 ) {

@@ -1,48 +1,99 @@
-import { decryptSecrets } from "../crypto";
+import { decryptSecrets, encryptSecrets } from "../crypto";
 import { sanitizeErrorMessage } from "./safe";
-import { withSftp } from "../sftp/client";
+import { applyDiscovery, discoverSftp } from "../sftp/discover";
+import { prisma } from "../db";
+import type { DiscoveredCms } from "../sftp/discover";
 
 export type ChannelTestResult = {
   ok: boolean;
   latencyMs: number;
   message: string;
+  discovery?: {
+    protocol: "sftp" | "ftp" | "ftps";
+    port: number;
+    rootPath: string;
+    cms: DiscoveredCms;
+    triedPorts: number[];
+    attempts?: string[];
+  };
 };
 
 export type ConnectionTestResult = {
   sftp: ChannelTestResult | null;
   api: ChannelTestResult | null;
+  cms?: DiscoveredCms;
 };
 
-async function testSftp(secretsEnc: string): Promise<ChannelTestResult> {
+async function testSftp(
+  siteId: string,
+  secretsEnc: string,
+  currentCms: string,
+): Promise<{ result: ChannelTestResult; cms?: DiscoveredCms }> {
   const started = Date.now();
   try {
     const secrets = decryptSecrets(secretsEnc);
     if (!secrets.sftp) {
       return {
-        ok: false,
-        latencyMs: 0,
-        message: "Nessuna credenziale SFTP configurata",
+        result: {
+          ok: false,
+          latencyMs: 0,
+          message: "Nessuna credenziale SFTP configurata",
+        },
       };
     }
 
-    await withSftp(secrets.sftp, async (client, root) => {
-      // Verifica accesso in lettura alla root (nessun file scaricato in chiaro al client)
-      const list = await client.list(root);
-      if (!Array.isArray(list)) {
-        throw new Error("Risposta SFTP non valida");
-      }
-    });
+    const discovery = await discoverSftp(secrets.sftp);
+    const nextSftp = applyDiscovery(secrets.sftp, discovery);
+
+    // Persisti porta/root scoperte
+    const changed =
+      nextSftp.port !== secrets.sftp.port ||
+      nextSftp.rootPath !== secrets.sftp.rootPath ||
+      nextSftp.protocol !== secrets.sftp.protocol ||
+      (discovery.cms !== "unknown" && discovery.cms !== currentCms);
+
+    if (changed) {
+      const nextCms =
+        discovery.cms !== "unknown" ? discovery.cms : currentCms;
+      await prisma.site.update({
+        where: { id: siteId },
+        data: {
+          cms: nextCms,
+          secretsEnc: encryptSecrets({
+            ...secrets,
+            sftp: nextSftp,
+          }),
+        },
+      });
+    }
+
+    const cmsLabel =
+      discovery.cms === "unknown" ? currentCms : discovery.cms;
+    const proto = discovery.protocol.toUpperCase();
 
     return {
-      ok: true,
-      latencyMs: Date.now() - started,
-      message: `Connessione SFTP OK · accesso a ${secrets.sftp.rootPath}`,
+      result: {
+        ok: true,
+        latencyMs: Date.now() - started,
+        message: `${proto} OK · porta ${discovery.port} · root ${discovery.rootPath} · ${cmsLabel}`,
+        discovery: {
+          protocol: discovery.protocol,
+          port: discovery.port,
+          rootPath: discovery.rootPath,
+          cms: discovery.cms,
+          triedPorts: discovery.triedPorts,
+          attempts: discovery.attempts,
+        },
+      },
+      cms: discovery.cms,
     };
   } catch (err) {
     return {
-      ok: false,
-      latencyMs: Date.now() - started,
-      message: sanitizeErrorMessage(err),
+      result: {
+        ok: false,
+        latencyMs: Date.now() - started,
+        message: sanitizeErrorMessage(err),
+      },
     };
   }
 }
@@ -108,6 +159,7 @@ async function testApi(
 }
 
 export async function testSiteConnection(input: {
+  siteId: string;
   siteUrl: string;
   cms: string;
   secretsEnc: string | null;
@@ -129,14 +181,21 @@ export async function testSiteConnection(input: {
   }
 
   const channels = input.channels ?? ["sftp", "api"];
-  const [sftp, api] = await Promise.all([
-    channels.includes("sftp")
-      ? testSftp(input.secretsEnc)
-      : Promise.resolve(null),
-    channels.includes("api")
-      ? testApi(input.siteUrl, input.cms, input.secretsEnc)
-      : Promise.resolve(null),
-  ]);
+  let cms: DiscoveredCms | undefined;
 
-  return { sftp, api };
+  let sftp: ChannelTestResult | null = null;
+  if (channels.includes("sftp")) {
+    const out = await testSftp(input.siteId, input.secretsEnc, input.cms);
+    sftp = out.result;
+    cms = out.cms;
+  }
+
+  const effectiveCms =
+    cms && cms !== "unknown" ? cms : input.cms;
+
+  const api = channels.includes("api")
+    ? await testApi(input.siteUrl, effectiveCms, input.secretsEnc)
+    : null;
+
+  return { sftp, api, cms };
 }

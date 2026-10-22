@@ -9,6 +9,7 @@ export type SecretsMeta = {
     port: number;
     username: string;
     rootPath: string;
+    protocol: "sftp" | "ftp" | "ftps";
     auth: "password" | "key" | "none";
   } | null;
   api: {
@@ -24,9 +25,19 @@ export function toSecretsMeta(secrets: SiteSecrets | null): SecretsMeta {
   const sftp = secrets.sftp
     ? {
         host: secrets.sftp.host,
-        port: secrets.sftp.port ?? 22,
+        port:
+          secrets.sftp.port ??
+          (secrets.sftp.protocol === "ftp"
+            ? 21
+            : secrets.sftp.protocol === "ftps"
+              ? 990
+              : 22),
         username: secrets.sftp.username,
         rootPath: secrets.sftp.rootPath,
+        protocol: (secrets.sftp.protocol ?? "sftp") as
+          | "sftp"
+          | "ftp"
+          | "ftps",
         auth: secrets.sftp.privateKey
           ? ("key" as const)
           : secrets.sftp.password
@@ -90,8 +101,12 @@ export function mergeSecrets(
     const prev = current?.sftp;
     const host = (patch.sftp.host ?? prev?.host ?? "").trim();
     const username = (patch.sftp.username ?? prev?.username ?? "").trim();
-    const rootPath = (patch.sftp.rootPath ?? prev?.rootPath ?? "/public_html").trim();
-    const port = patch.sftp.port ?? prev?.port ?? 22;
+    const rootPath = (
+      patch.sftp.rootPath ??
+      prev?.rootPath ??
+      "httpdocs"
+    ).trim();
+    const port = patch.sftp.port ?? prev?.port;
 
     const password =
       patch.sftp.password && patch.sftp.password.length > 0
@@ -113,6 +128,7 @@ export function mergeSecrets(
       rootPath,
       password,
       privateKey,
+      protocol: prev?.protocol,
     };
     next.sftp = sftp;
   }

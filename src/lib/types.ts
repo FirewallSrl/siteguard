@@ -30,8 +30,10 @@ export type SftpCredentials = {
   username: string;
   password?: string;
   privateKey?: string;
-  /** Path assoluto alla root del sito (es. /public_html) */
+  /** Path relativo alla home (es. httpdocs) */
   rootPath: string;
+  /** sftp | ftp | ftps — scelto in automatico dalla discovery */
+  protocol?: "sftp" | "ftp" | "ftps";
 };
 
 export type ApiCredentials = {

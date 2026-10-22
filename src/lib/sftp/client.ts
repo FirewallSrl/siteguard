@@ -1,113 +1,140 @@
-import SftpClient from "ssh2-sftp-client";
 import type { SftpCredentials } from "../types";
+import { discoverSftp } from "./discover";
+import { connectFtp } from "./ftp-client";
+import type { RemoteFsClient } from "./remote-fs";
+import { connectSftp } from "./sftp-compat";
+
+export type { RemoteFsClient } from "./remote-fs";
 
 export async function withSftp<T>(
   creds: SftpCredentials,
-  fn: (client: SftpClient, root: string) => Promise<T>,
+  fn: (client: RemoteFsClient, root: string) => Promise<T>,
 ): Promise<T> {
   if (!creds.password && !creds.privateKey) {
-    throw new Error("SFTP: manca password o chiave privata");
+    throw new Error("Trasferimento file: manca password o chiave privata");
   }
 
-  const client = new SftpClient();
+  let effective = creds;
+  if (
+    !creds.protocol ||
+    !creds.rootPath ||
+    creds.rootPath === "." ||
+    creds.rootPath === "/"
+  ) {
+    const discovery = await discoverSftp(creds);
+    effective = {
+      ...creds,
+      protocol: discovery.protocol,
+      port: discovery.port,
+      rootPath: discovery.rootPath,
+    };
+  }
+
+  const protocol = effective.protocol ?? "sftp";
+  const client =
+    protocol === "ftp" || protocol === "ftps"
+      ? await connectFtp({
+          host: effective.host,
+          port: effective.port ?? (protocol === "ftps" ? 990 : 21),
+          username: effective.username,
+          password: effective.password!,
+          secure:
+            protocol === "ftps"
+              ? effective.port === 990 || effective.port === 989
+                ? "implicit"
+                : true
+              : false,
+          timeoutMs: 20_000,
+        })
+      : await connectSftp({
+          host: effective.host,
+          port: effective.port ?? 22,
+          username: effective.username,
+          password: effective.password,
+          privateKey: effective.privateKey,
+          timeoutMs: 20_000,
+        });
+
   try {
-    await client.connect({
-      host: creds.host,
-      port: creds.port ?? 22,
-      username: creds.username,
-      password: creds.password,
-      privateKey: creds.privateKey,
-      readyTimeout: 20_000,
-      // Preferisci algoritmi moderni; niente log di secret
-      algorithms: {
-        serverHostKey: [
-          "ssh-ed25519",
-          "ecdsa-sha2-nistp256",
-          "rsa-sha2-512",
-          "rsa-sha2-256",
-          "ssh-rsa",
-        ],
-      },
-    });
-    const root = await resolveRootPath(client, creds.rootPath);
+    const root = await ensureReadableRoot(client, effective.rootPath);
     return await fn(client, root);
   } finally {
     await client.end().catch(() => undefined);
   }
 }
 
-/**
- * Su hosting Plesk/shared `/httpdocs` assoluto spesso è vuoto;
- * la docroot reale è relativa alla home: `httpdocs`.
- */
-async function resolveRootPath(
-  client: SftpClient,
+async function ensureReadableRoot(
+  client: RemoteFsClient,
   raw: string,
 ): Promise<string> {
-  const candidates = [
-    raw.replace(/\/$/, "") || ".",
-    raw.replace(/^\//, "").replace(/\/$/, "") || ".",
+  const preferred = raw.replace(/\/$/, "") || ".";
+  try {
+    const list = await client.list(preferred);
+    if (Array.isArray(list)) return preferred;
+  } catch {
+    /* fall through */
+  }
+
+  for (const path of [
+    preferred.replace(/^\//, ""),
     "httpdocs",
     "public_html",
     "www",
     "web",
     ".",
-  ];
-  // dedupe
-  const seen = new Set<string>();
-  const unique = candidates.filter((c) => {
-    if (seen.has(c)) return false;
-    seen.add(c);
-    return true;
-  });
-
-  for (const path of unique) {
+  ]) {
     try {
       const list = await client.list(path);
-      if (!list || list.length === 0) continue;
-      const names = new Set(list.map((e) => e.name));
-      const score =
-        (names.has("configuration.php") || names.has("wp-config.php") ? 5 : 0) +
-        (names.has("libraries") || names.has("wp-includes") ? 3 : 0) +
-        (names.has("administrator") || names.has("wp-content") ? 2 : 0) +
-        (names.has("components") || names.has("wp-admin") ? 1 : 0);
-      if (score >= 3) return path;
-      // almeno non vuota: tieni come fallback
-      if (score >= 1) return path;
+      if (list?.length) return path;
     } catch {
-      /* try next */
+      /* next */
     }
   }
-
-  return raw.replace(/\/$/, "") || ".";
+  return preferred;
 }
 
 export async function readTextFile(
-  client: SftpClient,
+  client: RemoteFsClient,
   path: string,
 ): Promise<string> {
-  const buf = (await client.get(path)) as Buffer;
+  const buf = await client.get(path);
   return buf.toString("utf8");
 }
 
 export async function listRecursive(
-  client: SftpClient,
+  client: RemoteFsClient,
   dir: string,
   maxFiles = 2000,
 ): Promise<string[]> {
+  const { isDirEntry } = await import("./paths");
   const out: string[] = [];
 
   async function walk(current: string) {
     if (out.length >= maxFiles) return;
-    const entries = await client.list(current);
+    let entries: Awaited<ReturnType<RemoteFsClient["list"]>> = [];
+    try {
+      entries = await client.list(current);
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (out.length >= maxFiles) break;
       const full = `${current}/${entry.name}`.replace(/\/+/g, "/");
-      if (entry.type === "d") {
-        if ([".", "..", "node_modules", ".git", "cache"].includes(entry.name)) {
+      if (isDirEntry(entry)) {
+        if (
+          [".", "..", "node_modules", ".git", "cache", "tmp"].includes(
+            entry.name,
+          )
+        ) {
           continue;
         }
-        await walk(full);
+        // FTP ambiguo: se list fallisce non è una cartella
+        try {
+          await client.list(full);
+          await walk(full);
+        } catch {
+          out.push(full);
+        }
       } else {
         out.push(full);
       }

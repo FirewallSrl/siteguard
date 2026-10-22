@@ -52,11 +52,11 @@ export const SCAN_SCOPE_DEFS: Record<ScanScope, ScanScopeDef> = {
   },
   links: {
     id: "links",
-    label: "Link rotti",
+    label: "Link e crawl",
     short: "Link",
-    description: "Crawl pagine e verifica URL 4xx/5xx",
+    description: "Crawl pagine, URL rotti e segnali di compromissione HTTP",
     modules: ["links"],
-    findingTypes: ["broken_link"],
+    findingTypes: ["broken_link", "malware"],
   },
   php: {
     id: "php",
@@ -87,13 +87,15 @@ export const SCAN_SCOPE_DEFS: Record<ScanScope, ScanScopeDef> = {
     id: "integrity",
     label: "Integrity / malware",
     short: "Integrity",
-    description: "File sospetti, utenti e segnali di compromissione",
-    modules: ["php", "api", "sftp", "inventory"],
+    description:
+      "Crawl live anti-hack, file sospetti, utenti e segnali di compromissione",
+    modules: ["links", "php", "api", "sftp", "inventory"],
     findingTypes: [
       "malware",
       "suspicious_user",
       "settings_hijack",
       "vulnerability",
+      "broken_link",
     ],
   },
 };
@@ -117,7 +119,7 @@ export function progressStepsForScope(scope: ScanScope) {
   const all = [
     { id: "start", label: "Avvio scansione" },
     { id: "ssl", label: "Controllo HTTPS / SSL" },
-    { id: "links", label: "Analisi link del sito" },
+    { id: "links", label: "Crawl link e anti-hack" },
     { id: "php", label: "Runtime PHP e advisory" },
     { id: "api", label: "Check API CMS" },
     { id: "sftp", label: "Connessione SFTP" },
