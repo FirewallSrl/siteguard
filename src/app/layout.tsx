@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
 import { IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
-import { Sidebar } from "@/components/sidebar";
+import { SidebarShell } from "@/components/sidebar-shell";
 import "./globals.css";
 
 const plexSans = IBM_Plex_Sans({
@@ -34,7 +34,7 @@ export default function RootLayout({
     >
       <body className="min-h-full bg-[var(--bg)] text-[var(--text)] antialiased">
         <Suspense fallback={<SidebarFallback />}>
-          <Sidebar />
+          <SidebarShell />
         </Suspense>
         <div className="app-shell">
           <main className="app-main">

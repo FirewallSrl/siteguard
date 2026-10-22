@@ -12,9 +12,27 @@ import {
   initScanProgress,
   type ProgressReporter,
 } from "./progress";
+import {
+  SCAN_SCOPE_DEFS,
+  findingMatchesScope,
+  parseScanScope,
+  progressStepsForScope,
+  scopeHas,
+  type ScanScope,
+} from "./scopes";
 
-export async function runSiteScan(siteId: string, scanId: string) {
-  initScanProgress(scanId, siteId);
+export async function runSiteScan(
+  siteId: string,
+  scanId: string,
+  scopeInput: ScanScope | string = "full",
+) {
+  const scope = parseScanScope(scopeInput);
+  const scopeDef = SCAN_SCOPE_DEFS[scope];
+
+  initScanProgress(scanId, siteId, {
+    scope,
+    steps: progressStepsForScope(scope),
+  });
   const progress = createProgressReporter(scanId);
 
   const site = await prisma.site.findUniqueOrThrow({ where: { id: siteId } });
@@ -23,7 +41,12 @@ export async function runSiteScan(siteId: string, scanId: string) {
     data: { status: "running", startedAt: new Date(), error: null },
   });
 
-  progress.start("start", `Analisi di ${site.url}`);
+  progress.start(
+    "start",
+    scope === "full"
+      ? `Analisi completa di ${site.url}`
+      : `${scopeDef.label} · ${site.url}`,
+  );
 
   try {
     const useDemo = process.env.DEMO_SCAN === "true" && !site.secretsEnc;
@@ -33,12 +56,16 @@ export async function runSiteScan(siteId: string, scanId: string) {
 
     if (useDemo) {
       progress.done("start");
-      progress.skip("ssl", "Modalità demo");
-      progress.skip("links", "Modalità demo");
-      progress.skip("api", "Modalità demo");
-      progress.skip("sftp", "Modalità demo");
+      for (const id of ["ssl", "links", "api", "sftp", "inventory", "updates"] as const) {
+        if (scopeHas(scope, id) || scope === "full") {
+          progress.skip(id, "Modalità demo");
+        }
+      }
       progress.start("inventory", "Inventario demo");
       rawFindings = buildDemoFindings(site.url);
+      if (scope !== "full") {
+        rawFindings = rawFindings.filter((f) => findingMatchesScope(f, scope));
+      }
       inventory = {
         collectedAt: new Date().toISOString(),
         cms: site.cms,
@@ -48,23 +75,50 @@ export async function runSiteScan(siteId: string, scanId: string) {
         plugins: [
           { name: "Demo Plugin", type: "plugin", version: "1.0", enabled: true },
         ],
-        notes: ["Inventario demo"],
+        notes: [`Inventario demo · scope ${scope}`],
         source: ["public"],
       };
       progress.done("inventory");
       progress.skip("updates", "Demo");
     } else {
       progress.done("start", "Credenziali e target pronti");
-      const live = await collectLive(site, progress);
+      const live = await collectLive(
+        {
+          id: site.id,
+          url: site.url,
+          cms: site.cms,
+          secretsEnc: site.secretsEnc,
+          inventoryJson: site.inventoryJson,
+        },
+        progress,
+        scope,
+      );
       rawFindings = live.findings;
       inventory = live.inventory;
     }
 
     progress.start("save", `Salvataggio di ${rawFindings.length} finding…`);
-    await prisma.finding.updateMany({
-      where: { siteId, status: "open" },
-      data: { status: "resolved" },
-    });
+
+    if (scope === "full") {
+      await prisma.finding.updateMany({
+        where: { siteId, status: "open" },
+        data: { status: "resolved" },
+      });
+    } else if (scopeDef.findingTypes.length > 0) {
+      const open = await prisma.finding.findMany({
+        where: { siteId, status: "open" },
+        select: { id: true, type: true, title: true },
+      });
+      const toResolve = open
+        .filter((f) => findingMatchesScope(f, scope))
+        .map((f) => f.id);
+      if (toResolve.length > 0) {
+        await prisma.finding.updateMany({
+          where: { id: { in: toResolve } },
+          data: { status: "resolved" },
+        });
+      }
+    }
 
     for (const f of rawFindings) {
       const finding = await prisma.finding.create({
@@ -98,6 +152,7 @@ export async function runSiteScan(siteId: string, scanId: string) {
               findingType: f.type,
               plan: f.proposedPlan,
               evidence: f.evidence,
+              scope,
             }),
           },
         });
@@ -108,21 +163,30 @@ export async function runSiteScan(siteId: string, scanId: string) {
       (inventory?.plugins.length ?? 0) +
       (inventory?.extensions.length ?? 0) +
       (inventory?.modules?.length ?? 0);
-    const summary = `${rawFindings.length} finding · ${useDemo ? "demo" : "live"}${
+    const scopeLabel = scope === "full" ? "completa" : scopeDef.short;
+    const summary = `${rawFindings.length} finding · ${scopeLabel}${
+      useDemo ? " · demo" : " · live"
+    }${
       inventory?.coreVersion ? ` · ${inventory.cms} ${inventory.coreVersion}` : ""
     }${extCount ? ` · ${extCount} estensioni` : ""}`;
 
-    await prisma.scan.update({
-      where: { id: scanId },
-      data: { status: "completed", finishedAt: new Date(), summary },
-    });
+    const inventoryPayload =
+      inventory &&
+      (scope === "full" ||
+        scopeHas(scope, "inventory") ||
+        scopeHas(scope, "php") ||
+        scopeHas(scope, "updates"))
+        ? await mergeInventory(site.inventoryJson, inventory, scope)
+        : undefined;
 
     await prisma.site.update({
       where: { id: siteId },
       data: {
         status: "connected",
         lastScanAt: new Date(),
-        inventoryJson: inventory ? JSON.stringify(inventory) : undefined,
+        ...(inventoryPayload
+          ? { inventoryJson: JSON.stringify(inventoryPayload) }
+          : {}),
       },
     });
 
@@ -133,18 +197,26 @@ export async function runSiteScan(siteId: string, scanId: string) {
         detail: JSON.stringify({
           scanId,
           summary,
+          scope,
           demo: useDemo,
           coreVersion: inventory?.coreVersion ?? null,
         }),
       },
     });
 
+    // Progress must be finished before DB status=completed, otherwise the
+    // client stops polling with "save" still active.
     progress.done("save", summary);
     progress.start("done");
     progress.done("done", summary);
     finishScanProgress(scanId, { ok: true, summary });
 
-    return { ok: true as const, summary, count: rawFindings.length, inventory };
+    await prisma.scan.update({
+      where: { id: scanId },
+      data: { status: "completed", finishedAt: new Date(), summary },
+    });
+
+    return { ok: true as const, summary, count: rawFindings.length, inventory, scope };
   } catch (err) {
     const message = err instanceof Error ? err.message : "Scan fallito";
     progress.fail("save", message);
@@ -161,10 +233,39 @@ export async function runSiteScan(siteId: string, scanId: string) {
       data: {
         siteId,
         event: "scan.failed",
-        detail: JSON.stringify({ scanId, error: message }),
+        detail: JSON.stringify({ scanId, scope, error: message }),
       },
     });
     throw err;
+  }
+}
+
+async function mergeInventory(
+  existingJson: string | null,
+  next: SiteInventory,
+  scope: ScanScope,
+): Promise<SiteInventory> {
+  if (scope === "full" || !existingJson) return next;
+  try {
+    const prev = JSON.parse(existingJson) as SiteInventory;
+    return {
+      ...prev,
+      ...next,
+      ssl: next.ssl ?? prev.ssl,
+      brokenLinks: next.brokenLinks ?? prev.brokenLinks,
+      phpVersion: next.phpVersion ?? prev.phpVersion,
+      phpSource: next.phpSource ?? prev.phpSource,
+      phpAdvisories: next.phpAdvisories ?? prev.phpAdvisories,
+      plugins: next.plugins?.length ? next.plugins : prev.plugins,
+      themes: next.themes?.length ? next.themes : prev.themes,
+      extensions: next.extensions?.length ? next.extensions : prev.extensions,
+      modules: next.modules?.length ? next.modules : prev.modules,
+      notes: [...(prev.notes ?? []), ...(next.notes ?? [])].slice(-12),
+      source: Array.from(new Set([...(prev.source ?? []), ...(next.source ?? [])])),
+      collectedAt: next.collectedAt || prev.collectedAt,
+    };
+  } catch {
+    return next;
   }
 }
 
@@ -174,8 +275,10 @@ async function collectLive(
     url: string;
     cms: string;
     secretsEnc: string | null;
+    inventoryJson?: string | null;
   },
   progress: ProgressReporter,
+  scope: ScanScope,
 ): Promise<{ findings: ScanFinding[]; inventory: SiteInventory }> {
   const findings: ScanFinding[] = [];
   const inventory: SiteInventory = {
@@ -189,177 +292,324 @@ async function collectLive(
     source: ["public"],
   };
 
-  progress.start("ssl", "Verifica certificato…");
-  const sslFindings = await checkSsl(site.url);
-  findings.push(...sslFindings);
+  // Seed from previous inventory when doing updates-only style work
+  if (
+    site.inventoryJson &&
+    (scope === "updates" ||
+      scope === "inventory" ||
+      scope === "integrity" ||
+      scope === "php")
+  ) {
+    try {
+      const prev = JSON.parse(site.inventoryJson) as SiteInventory;
+      Object.assign(inventory, prev, {
+        collectedAt: new Date().toISOString(),
+        notes: [...(prev.notes ?? [])],
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  let sslEv: { daysLeft?: number; validTo?: string } | undefined;
   const https = site.url.startsWith("https:");
-  inventory.ssl = { https };
-  const sslEv = sslFindings[0]?.evidence as
-    | { daysLeft?: number; validTo?: string }
-    | undefined;
-  if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
-  if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
-  progress.done(
-    "ssl",
-    sslEv?.daysLeft != null
-      ? `HTTPS · ${sslEv.daysLeft} giorni residui`
-      : https
-        ? "HTTPS attivo"
-        : "Senza HTTPS",
-  );
 
-  progress.start("links", "Crawl pagine e verifica URL…");
-  const { checkBrokenLinks } = await import("./checks/broken-links");
-  const linkReport = await checkBrokenLinks(site.url);
-  findings.push(...linkReport.findings);
-  inventory.brokenLinks = {
-    pagesScanned: linkReport.pagesScanned,
-    linksChecked: linkReport.linksChecked,
-    brokenCount: linkReport.brokenCount,
-    items: linkReport.items.map((b) => ({
-      url: b.url,
-      status: b.status,
-      from: b.from,
-      error: b.error ?? null,
-    })),
-  };
-  inventory.notes?.push(
-    linkReport.brokenCount > 0
-      ? `${linkReport.brokenCount} URL rotti su ${linkReport.linksChecked} controllati (${linkReport.pagesScanned} pagine)`
-      : `URL check OK: ${linkReport.linksChecked} link su ${linkReport.pagesScanned} pagine`,
-  );
-  progress.done(
-    "links",
-    linkReport.linksChecked > 0
-      ? `${linkReport.linksChecked} URL · ${linkReport.brokenCount} rotti`
-      : "Nessun URL estratto dalla homepage",
-  );
+  if (scopeHas(scope, "ssl")) {
+    progress.start("ssl", "Verifica certificato…");
+    const sslResult = await checkSsl(site.url);
+    findings.push(...sslResult.findings);
+    inventory.ssl = sslResult.ssl;
+    sslEv =
+      sslResult.ssl.daysLeft != null || sslResult.ssl.validTo
+        ? {
+            daysLeft: sslResult.ssl.daysLeft,
+            validTo: sslResult.ssl.validTo,
+          }
+        : undefined;
+    progress.done(
+      "ssl",
+      sslEv?.daysLeft != null
+        ? `HTTPS · ${sslEv.daysLeft} giorni residui${
+            sslEv.validTo
+              ? ` · scade ${sslEv.validTo.slice(0, 10)}`
+              : ""
+          }`
+        : inventory.ssl.https
+          ? "HTTPS attivo"
+          : "Senza HTTPS",
+    );
+  }
 
-  if (!site.secretsEnc) {
-    progress.skip("api", "Nessuna credenziale");
-    progress.skip("sftp", "Nessuna credenziale");
-    progress.skip("inventory", "Scan parziale");
-    progress.skip("updates", "Scan parziale");
-    findings.push({
-      type: "config",
-      severity: "medium",
-      title: "Nessuna credenziale: scan parziale",
-      description:
-        "Eseguiti SSL e link check pubblici. Configura SFTP/API per inventario e integrity.",
-      evidence: {},
-      proposedPlan: {
-        summary: "Aggiungere accessi SFTP e/o API",
-        steps: ["Tab Accessi", "Salva", "Testa connessione", "Rescan"],
-        risk: "medium",
-        requiresBackup: false,
-      },
-    });
+  if (scopeHas(scope, "links")) {
+    progress.start("links", "Crawl pagine e verifica URL…");
+    const { checkBrokenLinks } = await import("./checks/broken-links");
+    const linkReport = await checkBrokenLinks(site.url);
+    findings.push(...linkReport.findings);
+    inventory.brokenLinks = {
+      pagesScanned: linkReport.pagesScanned,
+      linksChecked: linkReport.linksChecked,
+      brokenCount: linkReport.brokenCount,
+      items: linkReport.items.map((b) => ({
+        url: b.url,
+        status: b.status,
+        from: b.from,
+        error: b.error ?? null,
+      })),
+    };
+    inventory.notes?.push(
+      linkReport.brokenCount > 0
+        ? `${linkReport.brokenCount} URL rotti su ${linkReport.linksChecked} controllati (${linkReport.pagesScanned} pagine)`
+        : `URL check OK: ${linkReport.linksChecked} link su ${linkReport.pagesScanned} pagine`,
+    );
+    progress.done(
+      "links",
+      linkReport.linksChecked > 0
+        ? `${linkReport.linksChecked} URL · ${linkReport.brokenCount} rotti`
+        : "Nessun URL estratto dalla homepage",
+    );
+  }
+
+  // PHP runtime: header pubblici subito; SFTP raffina dopo se disponibile
+  let phpChecked = false;
+  if (scopeHas(scope, "php")) {
+    progress.start("php", "Rilevamento versione PHP…");
+    const phpFindings = await runPhpAdvisoryCheck(site.url, inventory);
+    findings.push(...phpFindings);
+    phpChecked = true;
+    progress.done(
+      "php",
+      inventory.phpVersion
+        ? `PHP ${inventory.phpVersion}${
+            inventory.phpAdvisories?.length
+              ? ` · ${inventory.phpAdvisories.length} advisory`
+              : " · ok"
+          }`
+        : "Versione PHP non esposta (header nascosti)",
+    );
+  }
+
+  const needsCreds =
+    scopeHas(scope, "api") ||
+    scopeHas(scope, "sftp") ||
+    scopeHas(scope, "inventory") ||
+    scopeHas(scope, "updates");
+
+  if (needsCreds && !site.secretsEnc) {
+    if (scopeHas(scope, "api")) progress.skip("api", "Nessuna credenziale");
+    if (scopeHas(scope, "sftp")) progress.skip("sftp", "Nessuna credenziale");
+    if (scopeHas(scope, "inventory")) progress.skip("inventory", "Scan parziale");
+    if (scopeHas(scope, "updates")) progress.skip("updates", "Scan parziale");
+    if (
+      scope === "full" ||
+      scope === "inventory" ||
+      scope === "updates" ||
+      scope === "integrity"
+    ) {
+      findings.push({
+        type: "config",
+        severity: "medium",
+        title: "Nessuna credenziale: scan parziale",
+        description:
+          "Eseguiti i check pubblici disponibili. Configura SFTP/API per inventario e integrity.",
+        evidence: { scope },
+        proposedPlan: {
+          summary: "Aggiungere accessi SFTP e/o API",
+          steps: ["Tab Accessi", "Salva", "Testa connessione", "Rescan"],
+          risk: "medium",
+          requiresBackup: false,
+        },
+      });
+    }
     return { findings, inventory };
   }
 
-  const secrets = decryptSecrets(site.secretsEnc);
+  const secrets = site.secretsEnc ? decryptSecrets(site.secretsEnc) : null;
 
-  if (site.cms === "wordpress" && secrets.api) {
-    progress.start("api", "WordPress REST…");
-    findings.push(...(await runWordpressApiChecks(site.url, secrets.api)));
-    progress.done("api", "API WordPress OK");
-  } else if (site.cms === "joomla" && secrets.api) {
-    progress.start("api", "Joomla Web Services…");
-    findings.push(...(await runJoomlaApiChecks(site.url, secrets.api)));
-    progress.done("api", "API Joomla OK");
-  } else {
-    progress.skip("api", "API non configurata");
+  if (secrets && scopeHas(scope, "api")) {
+    if (site.cms === "wordpress" && secrets.api) {
+      progress.start("api", "WordPress REST…");
+      const apiFindings = await runWordpressApiChecks(site.url, secrets.api);
+      findings.push(
+        ...(scope === "integrity" || scope === "full"
+          ? apiFindings
+          : scope === "updates"
+            ? apiFindings.filter((f) =>
+                ["update_core", "update_plugin", "update_theme"].includes(f.type),
+              )
+            : apiFindings.filter((f) => f.type === "config")),
+      );
+      progress.done("api", "API WordPress OK");
+    } else if (site.cms === "joomla" && secrets.api) {
+      progress.start("api", "Joomla Web Services…");
+      findings.push(...(await runJoomlaApiChecks(site.url, secrets.api)));
+      progress.done("api", "API Joomla OK");
+    } else {
+      progress.skip("api", "API non configurata");
+    }
   }
 
-  if (secrets.sftp) {
+  const runSftpBlock =
+    secrets &&
+    (scopeHas(scope, "sftp") ||
+      scopeHas(scope, "inventory") ||
+      scopeHas(scope, "updates") ||
+      scope === "integrity");
+
+  if (secrets?.sftp && runSftpBlock) {
     progress.start("sftp", `${secrets.sftp.host}…`);
     const { withSftp } = await import("../sftp/client");
     await withSftp(secrets.sftp, async (client, root) => {
       progress.done("sftp", `Connesso · root ${root}`);
-      progress.start("inventory", "Lettura filesystem CMS…");
+
+      if (scopeHas(scope, "php")) {
+        const { detectPhpFromSftp, matchPhpAdvisories, findingsFromPhpHits } =
+          await import("./advisories/php");
+        const { readTextFile } = await import("../sftp/client");
+        const hit = await detectPhpFromSftp(
+          (path) => readTextFile(client, path),
+          root,
+        );
+        if (hit && (!inventory.phpVersion || hit.source !== "composer")) {
+          inventory.phpVersion = hit.version;
+          inventory.phpSource = hit.source;
+          const hits = matchPhpAdvisories(hit.version);
+          inventory.phpAdvisories = hits.map((h) => ({
+            id: h.advisory.id,
+            title: h.advisory.title,
+            severity: h.advisory.severity,
+            cves: h.advisory.cves,
+            fixedIn: h.fixedIn,
+            eol: h.eol,
+            sources: h.advisory.sources,
+          }));
+          // Evita duplicati se già creati dal check HTTP
+          const existing = new Set(
+            findings
+              .filter((f) => f.type === "vulnerability")
+              .map((f) => String((f.evidence as { advisoryId?: string })?.advisoryId ?? "")),
+          );
+          for (const f of findingsFromPhpHits(hits, hit.version)) {
+            const id = String(
+              (f.evidence as { advisoryId?: string })?.advisoryId ?? "",
+            );
+            if (!existing.has(id)) findings.push(f);
+          }
+          if (phpChecked) {
+            progress.setCurrent(
+              `PHP ${hit.version} via ${hit.source}${
+                hits.length ? ` · ${hits.length} advisory` : ""
+              }`,
+            );
+          }
+        }
+      }
+
+      if (scopeHas(scope, "inventory") || scope === "integrity" || scope === "updates") {
+        progress.start("inventory", "Lettura filesystem CMS…");
+      }
 
       if (site.cms === "wordpress") {
-        const { runWordpressSftpChecks } = await import(
-          "./checks/sftp-wordpress"
-        );
-        progress.setCurrent("Check integrity WordPress…");
-        findings.push(...(await runWordpressSftpChecks(client, root)));
-        const { collectWordpressInventory } = await import(
-          "./inventory/wordpress"
-        );
-        progress.setCurrent("Inventario plugin e temi…");
-        const inv = await collectWordpressInventory({
-          siteUrl: site.url,
-          api: secrets.api,
-          sftp: { client, root },
-        });
-        Object.assign(inventory, inv);
-        inventory.ssl = inventory.ssl ?? { https };
-        if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
-        if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
+        if (scope === "full" || scope === "integrity" || scope === "updates") {
+          const { runWordpressSftpChecks } = await import(
+            "./checks/sftp-wordpress"
+          );
+          progress.setCurrent("Check integrity WordPress…");
+          const sftpFindings = await runWordpressSftpChecks(client, root);
+          findings.push(
+            ...(scope === "updates"
+              ? sftpFindings.filter((f) => f.type === "update_core")
+              : scope === "integrity"
+                ? sftpFindings.filter((f) =>
+                    ["malware", "config"].includes(f.type),
+                  )
+                : sftpFindings),
+          );
+        }
+
+        if (scopeHas(scope, "inventory") || scope === "updates" || scope === "integrity") {
+          const { collectWordpressInventory } = await import(
+            "./inventory/wordpress"
+          );
+          progress.setCurrent("Inventario plugin e temi…");
+          const inv = await collectWordpressInventory({
+            siteUrl: site.url,
+            api: secrets.api,
+            sftp: { client, root },
+          });
+          Object.assign(inventory, inv);
+          inventory.ssl = inventory.ssl ?? { https };
+          if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
+          if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
+        }
       } else {
-        const { listRecursive, readTextFile } = await import("../sftp/client");
-        const { scanTextContent } = await import("./malware-patterns");
-        progress.setCurrent("Scan malware images/tmp…");
-        for (const dir of [`${root}/images`, `${root}/tmp`]) {
-          let files: string[] = [];
-          try {
-            files = await listRecursive(client, dir, 200);
-          } catch {
-            continue;
-          }
-          for (const file of files
-            .filter((f) => f.toLowerCase().endsWith(".php"))
-            .slice(0, 40)) {
+        if (scope === "full" || scope === "integrity") {
+          const { listRecursive, readTextFile } = await import("../sftp/client");
+          const { scanTextContent } = await import("./malware-patterns");
+          progress.setCurrent("Scan malware images/tmp…");
+          for (const dir of [`${root}/images`, `${root}/tmp`]) {
+            let files: string[] = [];
             try {
-              const content = await readTextFile(client, file);
-              for (const hit of scanTextContent(content, file)) {
-                findings.push({
-                  type: "malware",
-                  severity: hit.severity,
-                  title: `File sospetto: ${file.split("/").pop()}`,
-                  description: hit.description,
-                  evidence: { filePath: file, patternId: hit.patternId },
-                  proposedPlan: {
-                    summary: `Rimuovere ${file}`,
-                    steps: ["Backup", "Delete SFTP", "Rescan"],
-                    risk: hit.severity as "medium" | "high" | "critical",
-                    requiresBackup: true,
-                  },
-                });
-              }
+              files = await listRecursive(client, dir, 200);
             } catch {
-              /* skip */
+              continue;
+            }
+            for (const file of files
+              .filter((f) => f.toLowerCase().endsWith(".php"))
+              .slice(0, 40)) {
+              try {
+                const content = await readTextFile(client, file);
+                for (const hit of scanTextContent(content, file)) {
+                  findings.push({
+                    type: "malware",
+                    severity: hit.severity,
+                    title: `File sospetto: ${file.split("/").pop()}`,
+                    description: hit.description,
+                    evidence: { filePath: file, patternId: hit.patternId },
+                    proposedPlan: {
+                      summary: `Rimuovere ${file}`,
+                      steps: ["Backup", "Delete SFTP", "Rescan"],
+                      risk: hit.severity as "medium" | "high" | "critical",
+                      requiresBackup: true,
+                    },
+                  });
+                }
+              } catch {
+                /* skip */
+              }
             }
           }
         }
 
-        progress.setCurrent("Inventario componenti / plugin / moduli…");
-        const { collectJoomlaInventory } = await import("./inventory/joomla");
-        const inv = await collectJoomlaInventory({
-          siteUrl: site.url,
-          api: secrets.api,
-          sftp: { client, root },
-        });
-        Object.assign(inventory, inv);
-        inventory.ssl = inventory.ssl ?? { https };
-        if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
-        if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
+        if (scopeHas(scope, "inventory") || scope === "updates" || scope === "integrity") {
+          progress.setCurrent("Inventario componenti / plugin / moduli…");
+          const { collectJoomlaInventory } = await import("./inventory/joomla");
+          const inv = await collectJoomlaInventory({
+            siteUrl: site.url,
+            api: secrets.api,
+            sftp: { client, root },
+          });
+          Object.assign(inventory, inv);
+          inventory.ssl = inventory.ssl ?? { https };
+          if (sslEv?.daysLeft != null) inventory.ssl.daysLeft = sslEv.daysLeft;
+          if (sslEv?.validTo) inventory.ssl.validTo = sslEv.validTo;
+        }
       }
 
-      const extCount =
-        inventory.plugins.length +
-        inventory.extensions.length +
-        (inventory.modules?.length ?? 0);
-      progress.done(
-        "inventory",
-        inventory.coreVersion
-          ? `${inventory.cms} ${inventory.coreVersion} · ${extCount} estensioni`
-          : `${extCount} estensioni`,
-      );
+      if (scopeHas(scope, "inventory") || scope === "updates" || scope === "integrity") {
+        const extCount =
+          inventory.plugins.length +
+          inventory.extensions.length +
+          (inventory.modules?.length ?? 0);
+        progress.done(
+          "inventory",
+          inventory.coreVersion
+            ? `${inventory.cms} ${inventory.coreVersion} · ${extCount} estensioni`
+            : `${extCount} estensioni`,
+        );
+      }
     });
-  } else if (secrets.api) {
-    progress.skip("sftp", "Solo API");
+  } else if (secrets?.api && (scopeHas(scope, "inventory") || scope === "updates")) {
+    if (scopeHas(scope, "sftp")) progress.skip("sftp", "Solo API");
     progress.start("inventory", "Inventario via API…");
     if (site.cms === "wordpress") {
       const { collectWordpressInventory } = await import(
@@ -380,13 +630,17 @@ async function collectLive(
     }
     inventory.ssl = inventory.ssl ?? { https };
     progress.done("inventory", "Inventario API completato");
-  } else {
-    progress.skip("sftp", "SFTP non configurato");
-    progress.skip("inventory", "Nessuna fonte inventario");
+  } else if (needsCreds && secrets) {
+    if (scopeHas(scope, "sftp") && !secrets.sftp) {
+      progress.skip("sftp", "SFTP non configurato");
+    }
+    if (scopeHas(scope, "inventory") && !secrets.sftp && !secrets.api) {
+      progress.skip("inventory", "Nessuna fonte inventario");
+    }
   }
 
-  progress.start("updates", "Confronto versioni ufficiali…");
-  {
+  if (scopeHas(scope, "updates")) {
+    progress.start("updates", "Confronto versioni ufficiali…");
     const { enrichInventoryUpdates } = await import("./inventory/updates");
     const updateFindings = await enrichInventoryUpdates(inventory);
     const existingCore = findings.some((f) => f.type === "update_core");
@@ -402,7 +656,7 @@ async function collectLive(
     );
   }
 
-  if (findings.length === 0) {
+  if (findings.length === 0 && scope === "full") {
     findings.push({
       type: "config",
       severity: "info",
@@ -420,4 +674,57 @@ async function collectLive(
   }
 
   return { findings, inventory };
+}
+
+async function runPhpAdvisoryCheck(
+  siteUrl: string,
+  inventory: SiteInventory,
+): Promise<ScanFinding[]> {
+  const {
+    detectPhpFromHttp,
+    matchPhpAdvisories,
+    findingsFromPhpHits,
+  } = await import("./advisories/php");
+
+  const hit =
+    (await detectPhpFromHttp(siteUrl)) ??
+    (inventory.phpVersion
+      ? {
+          version: inventory.phpVersion,
+          source: (inventory.phpSource ?? "unknown") as
+            | "header"
+            | "sftp"
+            | "composer"
+            | "unknown",
+        }
+      : null);
+
+  if (!hit) {
+    inventory.notes?.push(
+      "PHP: versione non rilevata (header X-Powered-By assente). Prova SFTP o abilita esposizione controllata in staging.",
+    );
+    return [];
+  }
+
+  inventory.phpVersion = hit.version;
+  inventory.phpSource = hit.source;
+  const hits = matchPhpAdvisories(hit.version);
+  inventory.phpAdvisories = hits.map((h) => ({
+    id: h.advisory.id,
+    title: h.advisory.title,
+    severity: h.advisory.severity,
+    cves: h.advisory.cves,
+    fixedIn: h.fixedIn,
+    eol: h.eol,
+    sources: h.advisory.sources,
+  }));
+
+  if (hits.length === 0) {
+    inventory.notes?.push(
+      `PHP ${hit.version} · nessun advisory critico noto nel catalogo SiteGuard (ACN/php.net)`,
+    );
+    return [];
+  }
+
+  return findingsFromPhpHits(hits, hit.version);
 }

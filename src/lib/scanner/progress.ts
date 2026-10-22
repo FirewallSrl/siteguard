@@ -13,15 +13,17 @@ export type ScanProgress = {
   percent: number;
   current: string;
   steps: ScanStep[];
+  scope?: string;
   finished?: boolean;
   error?: string;
   updatedAt: number;
 };
 
-const STEP_DEFS: Array<{ id: string; label: string }> = [
+const DEFAULT_STEPS: Array<{ id: string; label: string }> = [
   { id: "start", label: "Avvio scansione" },
   { id: "ssl", label: "Controllo HTTPS / SSL" },
   { id: "links", label: "Analisi link del sito" },
+  { id: "php", label: "Runtime PHP e advisory" },
   { id: "api", label: "Check API CMS" },
   { id: "sftp", label: "Connessione SFTP" },
   { id: "inventory", label: "Inventario estensioni" },
@@ -32,13 +34,22 @@ const STEP_DEFS: Array<{ id: string; label: string }> = [
 
 const store = new Map<string, ScanProgress>();
 
-export function initScanProgress(scanId: string, siteId: string): ScanProgress {
+export function initScanProgress(
+  scanId: string,
+  siteId: string,
+  opts?: {
+    scope?: string;
+    steps?: Array<{ id: string; label: string }>;
+  },
+): ScanProgress {
+  const stepDefs = opts?.steps?.length ? opts.steps : DEFAULT_STEPS;
   const progress: ScanProgress = {
     scanId,
     siteId,
     percent: 0,
     current: "In coda…",
-    steps: STEP_DEFS.map((s) => ({ ...s, status: "pending" as const })),
+    scope: opts?.scope,
+    steps: stepDefs.map((s) => ({ ...s, status: "pending" as const })),
     updatedAt: Date.now(),
   };
   store.set(scanId, progress);

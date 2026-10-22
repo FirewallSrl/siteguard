@@ -19,6 +19,17 @@ export type SiteInventory = {
   /** Quanti elementi (core + estensioni) hanno un update disponibile */
   updatesPending?: number;
   phpVersion?: string;
+  phpSource?: "header" | "sftp" | "composer" | "unknown";
+  /** Advisory PHP aperti (ACN / php.net) rispetto alla versione rilevata */
+  phpAdvisories?: Array<{
+    id: string;
+    title: string;
+    severity: string;
+    cves: string[];
+    fixedIn?: string;
+    eol?: boolean;
+    sources?: Array<{ label: string; url: string }>;
+  }>;
   database?: string;
   ssl?: {
     https: boolean;

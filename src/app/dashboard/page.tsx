@@ -65,18 +65,18 @@ async function DashboardContent() {
   const openTotal = sites.reduce((acc, s) => acc + s.findings.length, 0);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-4">
       <header className="hero-band">
-        <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2 text-sm font-semibold text-white">
+            <div className="flex items-center gap-2 text-xs font-semibold text-white">
               <span className="status-dot" aria-hidden />
               Ready to scan
             </div>
-            <h1 className="font-display mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+            <h1 className="font-display mt-1.5 text-2xl font-bold tracking-tight text-white sm:text-3xl">
               Panoramica
             </h1>
-            <p className="mt-2 max-w-lg text-sm text-white/50">
+            <p className="mt-1 max-w-lg text-sm text-white/50">
               Monitora aggiornamenti e sicurezza. Collega un sito, testa gli accessi,
               scansiona, poi scegli AI o intervento manuale.
             </p>
@@ -88,7 +88,7 @@ async function DashboardContent() {
         </div>
       </header>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-1.5">
         <span className="tag tag-sand">
           <KeyRound strokeWidth={1.75} />
           Accessi
@@ -109,30 +109,30 @@ async function DashboardContent() {
           <span />
           <span />
         </div>
-        <p className="text-[1.05rem] leading-relaxed text-[var(--text)]">
+        <p className="text-[0.95rem] leading-snug text-[var(--text)]">
           Un flusso unico:{" "}
           <span className="mark mark-mint">inventario CMS</span>,{" "}
           <span className="mark mark-sand">finding di sicurezza</span> e{" "}
           <span className="mark mark-sky">azioni AI o manuali</span> — senza
           perdere il contesto del sito.
         </p>
-        <div className="mt-5 flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-wrap gap-1.5">
           <span className="filter-chip">SFTP / API</span>
           <span className="filter-chip">Integrity</span>
           <span className="filter-chip">Human-in-the-loop</span>
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+      <div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
         <section>
-          <h2 className="font-display text-2xl font-bold tracking-tight text-[var(--ink)]">
+          <h2 className="font-display text-xl font-bold tracking-tight text-[var(--ink)]">
             Monitoraggio continuo
           </h2>
-          <p className="mt-2 max-w-md text-[1.05rem] leading-relaxed text-[var(--muted)]">
+          <p className="mt-1.5 max-w-md text-sm leading-snug text-[var(--muted)]">
             Rileva versioni, aggiornamenti e segnali di compromissione. Tu
             scegli se lasciare agire l&apos;agente o intervenire a mano.
           </p>
-          <ul className="feature-list mt-5">
+          <ul className="feature-list mt-3">
             <li>
               <CheckBadge />
               Inventario core, componenti, plugin e template
@@ -146,7 +146,7 @@ async function DashboardContent() {
               Export operativo pronto per backup e intervento
             </li>
           </ul>
-          <div className="mt-6 flex flex-wrap items-center gap-4">
+          <div className="mt-4 flex flex-wrap items-center gap-3">
             <Link href="/sites/new" className="btn-primary">
               Collega un sito
             </Link>
@@ -157,7 +157,7 @@ async function DashboardContent() {
           </div>
         </section>
 
-        <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
+        <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
           <Stat label="Siti collegati" value={String(sites.length)} />
           <Stat label="Finding aperti" value={String(openTotal)} />
           <Stat
@@ -169,8 +169,8 @@ async function DashboardContent() {
       </div>
 
       <section>
-        <div className="mb-3 flex items-baseline justify-between">
-          <h2 className="font-display text-xl font-bold text-[var(--ink)]">Siti</h2>
+        <div className="mb-2 flex items-baseline justify-between">
+          <h2 className="font-display text-lg font-bold text-[var(--ink)]">Siti</h2>
           <span className="chip chip-slate">{sites.length} totali</span>
         </div>
 
@@ -313,7 +313,7 @@ function Stat({
         {label}
       </p>
       <p
-        className={`mt-2 font-display text-3xl font-bold tabular-nums tracking-tight ${
+        className={`mt-1 font-display text-2xl font-bold tabular-nums tracking-tight ${
           danger ? "text-[var(--danger)]" : "text-[var(--ink)]"
         }`}
       >

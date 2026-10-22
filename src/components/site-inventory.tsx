@@ -74,25 +74,37 @@ function InventoryDashboard({
     ) ?? [];
 
   const sslOk = inv.ssl?.https && (inv.ssl.daysLeft == null || inv.ssl.daysLeft > 14);
+  const sslExpiry = formatSslExpiry(inv.ssl?.validTo);
   const sslLabel = !inv.ssl?.https
     ? "No HTTPS"
-    : inv.ssl.daysLeft != null
-      ? `${inv.ssl.daysLeft}g SSL`
-      : "HTTPS ok";
+    : sslExpiry
+      ? inv.ssl.daysLeft != null
+        ? `scade ${sslExpiry} · ${inv.ssl.daysLeft}g`
+        : `scade ${sslExpiry}`
+      : inv.ssl.daysLeft != null
+        ? `${inv.ssl.daysLeft}g SSL`
+        : "HTTPS ok";
+
+  const updateTags = outdated.slice(0, 4).map((e) =>
+    e.latestVersion ? `${e.name} → ${e.latestVersion}` : e.name,
+  );
+  const moreUpdates = Math.max(0, outdated.length - updateTags.length);
 
   return (
     <div className="space-y-4">
       {/* Priorità — cosa sapere subito */}
       <section className="priority-stack">
+        <p className="priority-stack-label">Priorità</p>
+
         {inv.coreUpdateAvailable && inv.coreLatest ? (
           <PriorityRow
             tone="critical"
-            title={`Sistema ${inv.cms}: ${inv.coreVersion} → ${inv.coreLatest}`}
-            body="Aggiornamento core disponibile — priorità alta"
+            title={`Core ${inv.cms} ${inv.coreVersion} → ${inv.coreLatest}`}
+            body="Aggiornamento sistema disponibile"
             action={
               onOpenRemediation ? (
-                <button type="button" className="btn-on-dark" onClick={onOpenRemediation}>
-                  Vai a remediation
+                <button type="button" className="btn-priority" onClick={onOpenRemediation}>
+                  Remediation
                 </button>
               ) : undefined
             }
@@ -106,8 +118,8 @@ function InventoryDashboard({
         ) : inv.coreLatest ? (
           <PriorityRow
             tone="ok"
-            title={`Sistema ${inv.cms} ${inv.coreVersion}`}
-            body={`Allineato all’ultima stabile del branch (${inv.coreLatest})`}
+            title={`Core ${inv.cms} ${inv.coreVersion}`}
+            body={`Allineato al branch stabile (${inv.coreLatest})`}
           />
         ) : inv.coreVersion ? (
           <PriorityRow
@@ -127,40 +139,75 @@ function InventoryDashboard({
             }
             body={
               outdated.length > 0
-                ? outdated
-                    .slice(0, 3)
-                    .map((e) => `${e.name} → ${e.latestVersion}`)
-                    .join(" · ")
+                ? "Estensioni e componenti fuori versione"
                 : "Dettaglio in remediation e nelle liste sotto"
+            }
+            tags={
+              updateTags.length > 0
+                ? [
+                    ...updateTags,
+                    ...(moreUpdates > 0 ? [`+${moreUpdates} altri`] : []),
+                  ]
+                : undefined
             }
             action={
               findingsCount > 0 && onOpenRemediation ? (
-                <button type="button" className="btn-primary" onClick={onOpenRemediation}>
-                  Apri remediation ({findingsCount})
+                <button type="button" className="btn-priority" onClick={onOpenRemediation}>
+                  Remediation ({findingsCount})
                 </button>
               ) : undefined
             }
           />
         )}
 
-        {!sslOk && (
+        {inv.ssl ? (
           <PriorityRow
-            tone="warn"
-            title="HTTPS / SSL"
+            tone={sslOk ? "ok" : "warn"}
+            title={sslOk ? "SSL / HTTPS" : "HTTPS / SSL da verificare"}
             body={sslLabel}
           />
-        )}
+        ) : null}
+
+        {inv.phpAdvisories && inv.phpAdvisories.length > 0 ? (
+          <PriorityRow
+            tone="critical"
+            title={`PHP ${inv.phpVersion ?? "?"} vulnerabile`}
+            body="Advisory aperti · fonti ACN / php.net"
+            tags={inv.phpAdvisories.map((a) =>
+              a.eol ? `${a.id} · EOL` : a.id,
+            )}
+            action={
+              onOpenRemediation ? (
+                <button
+                  type="button"
+                  className="btn-priority"
+                  onClick={onOpenRemediation}
+                >
+                  Remediation
+                </button>
+              ) : undefined
+            }
+          />
+        ) : inv.phpVersion ? (
+          <PriorityRow
+            tone="ok"
+            title={`PHP ${inv.phpVersion}`}
+            body={`Runtime ok${
+              inv.phpSource ? ` · rilevato via ${inv.phpSource}` : ""
+            }`}
+          />
+        ) : null}
 
         {broken && broken.brokenCount > 0 && (
           <PriorityRow
             tone="warn"
             title={`${broken.brokenCount} URL rotti`}
-            body={`${broken.linksChecked} link controllati su ${broken.pagesScanned} pagine`}
+            body={`${broken.linksChecked} link su ${broken.pagesScanned} pagine`}
             action={
               onOpenRemediation ? (
                 <button
                   type="button"
-                  className="btn-ghost"
+                  className="btn-priority"
                   onClick={onOpenRemediation}
                 >
                   Vedi finding
@@ -191,6 +238,13 @@ function InventoryDashboard({
           value={sslLabel}
           ok={Boolean(sslOk)}
         />
+        {inv.phpVersion && (
+          <SnapItem
+            label="PHP"
+            value={inv.phpVersion}
+            ok={!inv.phpAdvisories?.length}
+          />
+        )}
         <SnapItem label="Estensioni" value={String(extTotal)} />
         <SnapItem label="Template" value={String(inv.themes.length)} />
         <SnapItem
@@ -304,22 +358,34 @@ function InventoryDashboard({
   );
 }
 
+const PRIORITY_META: Record<
+  "critical" | "warn" | "ok" | "neutral",
+  string
+> = {
+  critical: "Critico",
+  warn: "Attenzione",
+  ok: "Ok",
+  neutral: "Info",
+};
+
 function PriorityRow({
   tone,
   title,
   body,
+  tags,
   action,
 }: {
   tone: "critical" | "warn" | "ok" | "neutral";
   title: string;
   body: string;
+  tags?: string[];
   action?: ReactNode;
 }) {
-  const isDark = tone === "critical";
   return (
     <div
-      className={`priority-row ${isDark ? "priority-row-dark" : ""}`}
+      className="priority-row"
       data-tone={tone}
+      data-has-action={action ? "true" : undefined}
     >
       <span className="priority-icon" aria-hidden>
         {tone === "ok" ? (
@@ -330,11 +396,21 @@ function PriorityRow({
           <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
         )}
       </span>
-      <div className="min-w-0 flex-1">
-        <p className="font-semibold leading-snug">{title}</p>
-        <p className="mt-0.5 truncate text-sm opacity-70">{body}</p>
+      <div className="priority-copy">
+        <span className="priority-meta">{PRIORITY_META[tone]}</span>
+        <p className="priority-title">{title}</p>
+        <p className="priority-body">{body}</p>
+        {tags && tags.length > 0 && (
+          <div className="priority-tags">
+            {tags.map((tag) => (
+              <span key={tag} className="priority-tag" title={tag}>
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
-      {action}
+      {action ? <div className="priority-action">{action}</div> : null}
     </div>
   );
 }
@@ -472,4 +548,15 @@ function collectOutdated(inv: SiteInventory): InventoryExtension[] {
 
 function countPending(inv: SiteInventory): number {
   return (inv.coreUpdateAvailable ? 1 : 0) + collectOutdated(inv).length;
+}
+
+function formatSslExpiry(validTo?: string): string | null {
+  if (!validTo) return null;
+  const d = new Date(validTo);
+  if (Number.isNaN(d.getTime())) return validTo.slice(0, 10);
+  return d.toLocaleDateString("it-IT", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 }

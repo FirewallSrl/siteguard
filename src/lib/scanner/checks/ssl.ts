@@ -1,8 +1,19 @@
 import tls from "tls";
 import type { ScanFinding } from "../types";
 
-export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
+export type SslCheckResult = {
+  findings: ScanFinding[];
+  ssl: {
+    https: boolean;
+    validTo?: string;
+    daysLeft?: number;
+    subject?: string;
+  };
+};
+
+export async function checkSsl(siteUrl: string): Promise<SslCheckResult> {
   const findings: ScanFinding[] = [];
+
   let host: string;
   let port = 443;
 
@@ -26,12 +37,12 @@ export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
           requiresBackup: false,
         },
       });
-      return findings;
+      return { findings, ssl: { https: false } };
     }
     host = u.hostname;
     port = u.port ? Number(u.port) : 443;
   } catch {
-    return findings;
+    return { findings, ssl: { https: false } };
   }
 
   try {
@@ -39,14 +50,21 @@ export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
     const daysLeft = Math.floor(
       (cert.validTo.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
     );
+    const validTo = cert.validTo.toISOString();
+    const ssl = {
+      https: true as const,
+      validTo,
+      daysLeft,
+      subject: cert.subject,
+    };
 
     if (daysLeft < 0) {
       findings.push({
         type: "config",
         severity: "critical",
         title: "Certificato SSL scaduto",
-        description: `Scaduto il ${cert.validTo.toISOString().slice(0, 10)}.`,
-        evidence: { host, validTo: cert.validTo.toISOString(), daysLeft },
+        description: `Scaduto il ${validTo.slice(0, 10)}.`,
+        evidence: { host, validTo, daysLeft },
         proposedPlan: {
           summary: "Rinnovare immediatamente il certificato SSL",
           steps: ["Rinnovo certificato", "Verificare catena CA", "Test SSL Labs"],
@@ -59,8 +77,8 @@ export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
         type: "config",
         severity: "high",
         title: `SSL in scadenza tra ${daysLeft} giorni`,
-        description: `Validità fino al ${cert.validTo.toISOString().slice(0, 10)}.`,
-        evidence: { host, validTo: cert.validTo.toISOString(), daysLeft },
+        description: `Validità fino al ${validTo.slice(0, 10)}.`,
+        evidence: { host, validTo, daysLeft },
         proposedPlan: {
           summary: "Rinnovare il certificato SSL",
           steps: ["Programmare rinnovo", "Verificare auto-renew"],
@@ -73,8 +91,8 @@ export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
         type: "config",
         severity: "medium",
         title: `SSL scade tra ${daysLeft} giorni`,
-        description: `Validità fino al ${cert.validTo.toISOString().slice(0, 10)}.`,
-        evidence: { host, validTo: cert.validTo.toISOString(), daysLeft },
+        description: `Validità fino al ${validTo.slice(0, 10)}.`,
+        evidence: { host, validTo, daysLeft },
         proposedPlan: {
           summary: "Pianificare rinnovo SSL",
           steps: ["Verificare auto-renew hosting"],
@@ -83,6 +101,8 @@ export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
         },
       });
     }
+
+    return { findings, ssl };
   } catch (err) {
     findings.push({
       type: "config",
@@ -97,9 +117,8 @@ export async function checkSsl(siteUrl: string): Promise<ScanFinding[]> {
         requiresBackup: false,
       },
     });
+    return { findings, ssl: { https: true } };
   }
-
-  return findings;
 }
 
 function getCertificate(host: string, port: number) {

@@ -144,14 +144,22 @@ async function SiteDetailContent({ params }: Props) {
   );
 
   let coreLabel: string | null = null;
+  let phpLabel: string | null = null;
+  let phpVulnerable = false;
   if (site.inventoryJson) {
     try {
       const inv = JSON.parse(site.inventoryJson) as {
         cms?: string;
         coreVersion?: string;
+        phpVersion?: string;
+        phpAdvisories?: unknown[];
       };
       if (inv.coreVersion) {
         coreLabel = `${inv.cms ?? site.cms} ${inv.coreVersion}`;
+      }
+      if (inv.phpVersion) {
+        phpLabel = `PHP ${inv.phpVersion}`;
+        phpVulnerable = (inv.phpAdvisories?.length ?? 0) > 0;
       }
     } catch {
       /* ignore */
@@ -184,6 +192,14 @@ async function SiteDetailContent({ params }: Props) {
             <div className="flex flex-wrap items-center gap-2">
               <span className="status-dot" aria-hidden />
               <span className="chip">{coreLabel ?? site.cms}</span>
+              {phpLabel && (
+                <span
+                  className={`chip ${phpVulnerable ? "chip-rose" : "chip-emerald"}`}
+                >
+                  {phpLabel}
+                  {phpVulnerable ? " · vuln" : ""}
+                </span>
+              )}
               <span
                 className={`chip ${
                   site.status === "connected"

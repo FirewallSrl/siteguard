@@ -9,11 +9,12 @@ export const scanSiteFn = inngest.createFunction(
     triggers: [{ event: "site/scan.requested" }],
   },
   async ({ event }) => {
-    const { siteId, scanId } = event.data as {
+    const { siteId, scanId, scope } = event.data as {
       siteId: string;
       scanId: string;
+      scope?: string;
     };
-    return runSiteScan(siteId, scanId);
+    return runSiteScan(siteId, scanId, scope ?? "full");
   },
 );
 
