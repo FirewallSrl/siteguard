@@ -3,8 +3,12 @@
 import { useMemo, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
+  ArrowUpRight,
   Check,
   ChevronDown,
+  Code2,
+  Link2,
+  Package,
   Shield,
   Sparkles,
 } from "lucide-react";
@@ -85,145 +89,166 @@ function InventoryDashboard({
         ? `${inv.ssl.daysLeft}g SSL`
         : "HTTPS ok";
 
-  const updateTags = outdated.slice(0, 4).map((e) =>
-    e.latestVersion ? `${e.name} → ${e.latestVersion}` : e.name,
-  );
-  const moreUpdates = Math.max(0, outdated.length - updateTags.length);
+  type Issue = {
+    id: string;
+    tone: "critical" | "warn";
+    label: string;
+    text: string;
+    detail?: string;
+    icon: typeof Shield;
+  };
+
+  const issues: Issue[] = [];
+
+  if (inv.coreUpdateAvailable && inv.coreLatest) {
+    issues.push({
+      id: "core",
+      tone: "critical",
+      label: "Core",
+      text: `${inv.cms} ${inv.coreVersion} → ${inv.coreLatest}`,
+      detail: "Aggiornamento sistema",
+      icon: Sparkles,
+    });
+  } else if (coreFailNote) {
+    issues.push({
+      id: "core-fail",
+      tone: "warn",
+      label: "Core",
+      text: "Versione non verificata",
+      icon: Sparkles,
+    });
+  }
+
+  if (inv.phpAdvisories && inv.phpAdvisories.length > 0) {
+    const eol = inv.phpAdvisories.some((a) => a.eol);
+    issues.push({
+      id: "php",
+      tone: "critical",
+      label: "PHP",
+      text: `${inv.phpVersion ?? "?"}${eol ? " · branch EOL" : " · vulnerabile"}`,
+      detail: "Advisory ACN / php.net",
+      icon: Code2,
+    });
+  }
+
+  if (!sslOk && inv.ssl) {
+    issues.push({
+      id: "ssl",
+      tone: "warn",
+      label: "SSL",
+      text: sslLabel,
+      icon: Shield,
+    });
+  }
+
+  if (outdated.length > 0) {
+    const top = outdated[0];
+    issues.push({
+      id: "ext",
+      tone: inv.coreUpdateAvailable ? "warn" : "critical",
+      label: "Ext",
+      text:
+        outdated.length === 1
+          ? `${top?.name ?? "estensione"} da aggiornare`
+          : `${outdated.length} estensioni da aggiornare`,
+      detail: top?.latestVersion
+        ? `es. ${top.name} → ${top.latestVersion}`
+        : undefined,
+      icon: Package,
+    });
+  }
+
+  if (broken && broken.brokenCount > 0) {
+    issues.push({
+      id: "links",
+      tone: "warn",
+      label: "URL",
+      text: `${broken.brokenCount} link rotti`,
+      detail: `${broken.linksChecked} controllati`,
+      icon: Link2,
+    });
+  }
 
   return (
     <div className="space-y-4">
-      {/* Priorità — cosa sapere subito */}
-      <section className="priority-stack">
-        <p className="priority-stack-label">Priorità</p>
-
-        {inv.coreUpdateAvailable && inv.coreLatest ? (
-          <PriorityRow
-            tone="critical"
-            title={`Core ${inv.cms} ${inv.coreVersion} → ${inv.coreLatest}`}
-            body="Aggiornamento sistema disponibile"
-            action={
-              onOpenRemediation ? (
-                <button type="button" className="btn-priority" onClick={onOpenRemediation}>
-                  Remediation
-                </button>
-              ) : undefined
-            }
-          />
-        ) : coreFailNote ? (
-          <PriorityRow
-            tone="warn"
-            title="Core non verificato"
-            body={coreFailNote}
-          />
-        ) : inv.coreLatest ? (
-          <PriorityRow
-            tone="ok"
-            title={`Core ${inv.cms} ${inv.coreVersion}`}
-            body={`Allineato al branch stabile (${inv.coreLatest})`}
-          />
-        ) : inv.coreVersion ? (
-          <PriorityRow
-            tone="neutral"
-            title={`CMS ${inv.cms} ${inv.coreVersion}`}
-            body="Versione rilevata"
-          />
-        ) : null}
-
-        {pending > 0 && (
-          <PriorityRow
-            tone={inv.coreUpdateAvailable ? "warn" : "critical"}
-            title={
-              pending === 1
-                ? "1 aggiornamento da fare"
-                : `${pending} aggiornamenti da fare`
-            }
-            body={
-              outdated.length > 0
-                ? "Estensioni e componenti fuori versione"
-                : "Dettaglio in remediation e nelle liste sotto"
-            }
-            tags={
-              updateTags.length > 0
-                ? [
-                    ...updateTags,
-                    ...(moreUpdates > 0 ? [`+${moreUpdates} altri`] : []),
-                  ]
-                : undefined
-            }
-            action={
-              findingsCount > 0 && onOpenRemediation ? (
-                <button type="button" className="btn-priority" onClick={onOpenRemediation}>
-                  Remediation ({findingsCount})
-                </button>
-              ) : undefined
-            }
-          />
-        )}
-
-        {inv.ssl ? (
-          <PriorityRow
-            tone={sslOk ? "ok" : "warn"}
-            title={sslOk ? "SSL / HTTPS" : "HTTPS / SSL da verificare"}
-            body={sslLabel}
-          />
-        ) : null}
-
-        {inv.phpAdvisories && inv.phpAdvisories.length > 0 ? (
-          <PriorityRow
-            tone="critical"
-            title={`PHP ${inv.phpVersion ?? "?"} vulnerabile`}
-            body="Advisory aperti · fonti ACN / php.net"
-            tags={inv.phpAdvisories.map((a) =>
-              a.eol ? `${a.id} · EOL` : a.id,
+      {issues.length > 0 ? (
+        <section className="priority-board">
+          <div className="priority-board-head">
+            <div className="priority-board-title">
+              <span className="priority-board-icon" aria-hidden>
+                <AlertTriangle className="h-4 w-4" strokeWidth={2.25} />
+              </span>
+              <div>
+                <p className="priority-board-kicker">Priorità</p>
+                <p className="priority-board-count">
+                  {issues.length === 1
+                    ? "1 problema aperto"
+                    : `${issues.length} problemi aperti`}
+                </p>
+              </div>
+            </div>
+            {onOpenRemediation && (
+              <button
+                type="button"
+                className="btn-on-dark"
+                onClick={onOpenRemediation}
+              >
+                Remediation
+                {findingsCount > 0 ? ` (${findingsCount})` : ""}
+                <ArrowUpRight className="h-3.5 w-3.5" strokeWidth={2.25} />
+              </button>
             )}
-            action={
-              onOpenRemediation ? (
-                <button
-                  type="button"
-                  className="btn-priority"
-                  onClick={onOpenRemediation}
+          </div>
+          <div
+            className="priority-board-list"
+            style={{
+              gridTemplateColumns: `repeat(${Math.min(issues.length, 3)}, minmax(0, 1fr))`,
+            }}
+          >
+            {issues.map((issue) => {
+              const Icon = issue.icon;
+              return (
+                <article
+                  key={issue.id}
+                  className="priority-board-row"
+                  data-tone={issue.tone}
                 >
-                  Remediation
-                </button>
-              ) : undefined
-            }
-          />
-        ) : inv.phpVersion ? (
-          <PriorityRow
-            tone="ok"
-            title={`PHP ${inv.phpVersion}`}
-            body={`Runtime ok${
-              inv.phpSource ? ` · rilevato via ${inv.phpSource}` : ""
-            }`}
-          />
-        ) : null}
-
-        {broken && broken.brokenCount > 0 && (
-          <PriorityRow
-            tone="warn"
-            title={`${broken.brokenCount} URL rotti`}
-            body={`${broken.linksChecked} link su ${broken.pagesScanned} pagine`}
-            action={
-              onOpenRemediation ? (
-                <button
-                  type="button"
-                  className="btn-priority"
-                  onClick={onOpenRemediation}
-                >
-                  Vedi finding
-                </button>
-              ) : undefined
-            }
-          />
-        )}
-        {broken && broken.brokenCount === 0 && broken.linksChecked > 0 && (
-          <PriorityRow
-            tone="ok"
-            title="URL del sito ok"
-            body={`${broken.linksChecked} link verificati · nessun 4xx/5xx`}
-          />
-        )}
-      </section>
+                  <div className="priority-board-row-top">
+                    <span className="priority-board-row-icon" aria-hidden>
+                      <Icon className="h-3.5 w-3.5" strokeWidth={2} />
+                    </span>
+                    <span
+                      className={
+                        issue.tone === "critical"
+                          ? "chip chip-rose"
+                          : "chip chip-slate"
+                      }
+                    >
+                      {issue.label}
+                    </span>
+                  </div>
+                  <p className="priority-board-row-text">{issue.text}</p>
+                  {issue.detail && (
+                    <p className="priority-board-row-detail">{issue.detail}</p>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ) : (
+        <section className="priority-board priority-board-ok">
+          <span className="priority-board-ok-icon" aria-hidden>
+            <Check className="h-4 w-4" strokeWidth={2.5} />
+          </span>
+          <div>
+            <p className="priority-board-ok-title">Nessuna priorità aperta</p>
+            <p className="priority-board-ok-body">
+              Inventario e check sotto controllo
+            </p>
+          </div>
+        </section>
+      )}
 
       {/* Snapshot compatto */}
       <div className="snap-bar">
@@ -354,63 +379,6 @@ function InventoryDashboard({
           : "—"}
         {inv.source.length > 0 ? ` · via ${inv.source.join(", ")}` : ""}
       </p>
-    </div>
-  );
-}
-
-const PRIORITY_META: Record<
-  "critical" | "warn" | "ok" | "neutral",
-  string
-> = {
-  critical: "Critico",
-  warn: "Attenzione",
-  ok: "Ok",
-  neutral: "Info",
-};
-
-function PriorityRow({
-  tone,
-  title,
-  body,
-  tags,
-  action,
-}: {
-  tone: "critical" | "warn" | "ok" | "neutral";
-  title: string;
-  body: string;
-  tags?: string[];
-  action?: ReactNode;
-}) {
-  return (
-    <div
-      className="priority-row"
-      data-tone={tone}
-      data-has-action={action ? "true" : undefined}
-    >
-      <span className="priority-icon" aria-hidden>
-        {tone === "ok" ? (
-          <Check className="h-3.5 w-3.5" strokeWidth={2.5} />
-        ) : tone === "neutral" ? (
-          <Shield className="h-3.5 w-3.5" strokeWidth={2} />
-        ) : (
-          <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} />
-        )}
-      </span>
-      <div className="priority-copy">
-        <span className="priority-meta">{PRIORITY_META[tone]}</span>
-        <p className="priority-title">{title}</p>
-        <p className="priority-body">{body}</p>
-        {tags && tags.length > 0 && (
-          <div className="priority-tags">
-            {tags.map((tag) => (
-              <span key={tag} className="priority-tag" title={tag}>
-                {tag}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-      {action ? <div className="priority-action">{action}</div> : null}
     </div>
   );
 }

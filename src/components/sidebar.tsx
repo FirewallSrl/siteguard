@@ -9,6 +9,7 @@ import {
   PlusSquare,
   Shield,
 } from "lucide-react";
+import { LogoutButton } from "@/components/logout-button";
 
 export type SidebarSite = {
   id: string;
@@ -48,6 +49,8 @@ function CmsGlyph({ cms }: { cms: string }) {
 
 export function Sidebar({ sites = [] }: { sites?: SidebarSite[] }) {
   const pathname = usePathname();
+
+  if (pathname === "/login") return null;
 
   return (
     <>
@@ -138,8 +141,11 @@ export function Sidebar({ sites = [] }: { sites?: SidebarSite[] }) {
         </div>
 
         <div className="sidebar-foot">
-          <span className="sidebar-foot-dot" aria-hidden />
-          v0.1 · SFTP + CMS API
+          <LogoutButton />
+          <p className="sidebar-foot-meta">
+            <span className="sidebar-foot-dot" aria-hidden />
+            v0.1 · SFTP + CMS API
+          </p>
         </div>
       </aside>
 
