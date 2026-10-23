@@ -15,12 +15,17 @@ export type FtpConnectOpts = {
 export async function connectFtp(opts: FtpConnectOpts): Promise<RemoteFsClient> {
   const client = new Client(opts.timeoutMs ?? 12_000);
   client.ftp.verbose = false;
+  const secure = opts.secure ?? false;
   await client.access({
     host: opts.host,
     port: opts.port ?? 21,
     user: opts.username,
     password: opts.password,
-    secure: opts.secure ?? false,
+    secure,
+    // Hosting spesso con cert sul nome dominio, mentre FTP usa IP
+    ...(secure
+      ? { secureOptions: { rejectUnauthorized: false } }
+      : {}),
   });
   return new FtpRemoteClient(client);
 }

@@ -249,6 +249,22 @@ function parseJoomlaVersionContent(content: string): string | null {
   return release?.trim() ?? null;
 }
 
+async function mapPool<T>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>,
+) {
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      await fn(items[idx]!);
+    }
+  }
+  const n = Math.min(concurrency, Math.max(1, items.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+}
+
 async function scanXmlDir(
   client: RemoteFsClient,
   dir: string,
@@ -258,17 +274,22 @@ async function scanXmlDir(
   const entries = await listEntries(client, dir);
   if (entries.length === 0) return;
 
-  for (const entry of entries) {
-    if (entry.name.startsWith(".")) continue;
-    if (!isDirEntry(entry)) continue;
+  const dirs = entries.filter(
+    (e) => isDirEntry(e) && !e.name.startsWith("."),
+  );
 
+  await mapPool(dirs, 6, async (entry) => {
     const folder = joinPath(dir, entry.name);
-    // FTP ambiguo: verifica listabilità
-    if (!(await canListDir(client, folder))) continue;
-
     try {
       const files = await listEntries(client, folder);
+      if (files.length === 0) return;
+
       const preferred =
+        files.find(
+          (f) =>
+            f.type !== "d" &&
+            f.name.toLowerCase() === "templatedetails.xml",
+        ) ??
         files.find(
           (f) =>
             f.type !== "d" &&
@@ -278,11 +299,10 @@ async function scanXmlDir(
           (f) =>
             f.type !== "d" &&
             f.name.toLowerCase().endsWith(".xml") &&
-            !f.name.toLowerCase().includes("config"),
+            !/config/i.test(f.name),
         );
 
       if (!preferred) {
-        // Cartella presente senza XML manifesto → registra almeno il nome
         if (type === "template" || type === "component") {
           target.push({
             name: entry.name,
@@ -291,7 +311,7 @@ async function scanXmlDir(
             enabled: true,
           });
         }
-        continue;
+        return;
       }
 
       const content = await readTextFile(
@@ -312,7 +332,7 @@ async function scanXmlDir(
     } catch {
       target.push({ name: entry.name, type, folder: entry.name });
     }
-  }
+  });
 }
 
 async function scanPluginTree(
@@ -321,16 +341,19 @@ async function scanPluginTree(
   target: InventoryExtension[],
 ) {
   const groups = await listEntries(client, pluginsRoot);
-  for (const group of groups) {
-    if (group.name.startsWith(".") || !isDirEntry(group)) continue;
-    const groupPath = joinPath(pluginsRoot, group.name);
-    if (!(await canListDir(client, groupPath))) continue;
+  const groupDirs = groups.filter(
+    (g) => isDirEntry(g) && !g.name.startsWith("."),
+  );
 
+  await mapPool(groupDirs, 4, async (group) => {
+    const groupPath = joinPath(pluginsRoot, group.name);
     const plugins = await listEntries(client, groupPath);
-    for (const plugin of plugins) {
-      if (plugin.name.startsWith(".") || !isDirEntry(plugin)) continue;
+    const pluginDirs = plugins.filter(
+      (p) => isDirEntry(p) && !p.name.startsWith("."),
+    );
+
+    await mapPool(pluginDirs, 6, async (plugin) => {
       const folder = joinPath(groupPath, plugin.name);
-      if (!(await canListDir(client, folder))) continue;
       try {
         const files = await listEntries(client, folder);
         const xml =
@@ -348,7 +371,7 @@ async function scanPluginTree(
             type: "plugin",
             folder: `${group.name}/${plugin.name}`,
           });
-          continue;
+          return;
         }
         const content = await readTextFile(client, joinPath(folder, xml.name));
         const name =
@@ -372,8 +395,8 @@ async function scanPluginTree(
           folder: `${group.name}/${plugin.name}`,
         });
       }
-    }
-  }
+    });
+  });
 }
 
 async function detectJoomlaVersionHttp(

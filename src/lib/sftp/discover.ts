@@ -187,13 +187,20 @@ async function probeRoots(
       const list = await client.list(path);
       if (!list || list.length === 0) continue;
       const names = new Set(list.map((e) => e.name));
-      const { score, cms } = scoreCmsMarkers(names);
+      const { score: rawScore, cms } = scoreCmsMarkers(names);
+      // Evita backup/OLD come docroot se esiste una cartella "viva"
+      const score = /(?:^|\/|-)(old|bak|backup|copy|deprecated)(?:\/|$)/i.test(
+        path,
+      )
+        ? Math.max(0, rawScore - 5)
+        : rawScore;
       if (!fallback) fallback = path;
       if (score > (best?.score ?? 0)) best = { rootPath: path, cms, score };
-      if (score >= 6) break;
+      // Non stoppare troppo presto su path "OLD": continua a cercare httpdocs vivo
+      if (score >= 6 && !/(?:^|\/|-)(old|bak|backup)/i.test(path)) break;
 
       // Un livello più in profondità (FTP home ≠ docroot)
-      if (score < 6) {
+      if (score < 6 || /(?:^|\/|-)(old|bak|backup)/i.test(path)) {
         for (const child of list
           .filter((e) => e.type === "d" || e.type === "l" || !/\.[a-z0-9]{1,8}$/i.test(e.name))
           .filter((e) => !e.name.startsWith("."))
@@ -204,19 +211,29 @@ async function probeRoots(
             const childList = await client.list(childPath);
             const childNames = new Set(childList.map((e) => e.name));
             const childScore = scoreCmsMarkers(childNames);
-            if (childScore.score > (best?.score ?? 0)) {
+            let childPts = childScore.score;
+            if (/(?:^|\/|-)(old|bak|backup|copy|deprecated)(?:\/|$)/i.test(childPath)) {
+              childPts = Math.max(0, childPts - 5);
+            }
+            if (childPts > (best?.score ?? 0)) {
               best = {
                 rootPath: childPath,
                 cms: childScore.cms,
-                score: childScore.score,
+                score: childPts,
               };
             }
-            if (childScore.score >= 6) break;
+            if (childPts >= 6 && !/(?:^|\/|-)(old|bak|backup)/i.test(childPath))
+              break;
           } catch {
             /* next child */
           }
         }
-        if ((best?.score ?? 0) >= 6) break;
+        if (
+          (best?.score ?? 0) >= 6 &&
+          best &&
+          !/(?:^|\/|-)(old|bak|backup)/i.test(best.rootPath)
+        )
+          break;
       }
     } catch {
       /* next */

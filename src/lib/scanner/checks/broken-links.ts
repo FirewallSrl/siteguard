@@ -10,10 +10,10 @@ type BrokenHit = {
 const SKIP_SCHEMES = /^(mailto:|tel:|javascript:|data:|#)/i;
 const MAX_PAGES = 10;
 const MAX_LINKS_TO_CHECK = 100;
-const CONCURRENCY = 8;
-const TIMEOUT_MS = 10000;
+const CONCURRENCY = 3;
+const TIMEOUT_MS = 20_000;
 const UA =
-  "Mozilla/5.0 (compatible; SiteGuard/1.0; +https://github.com/FirewallSrl/siteguard)";
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 export type BrokenLinksReport = {
   findings: ScanFinding[];
@@ -24,7 +24,8 @@ export type BrokenLinksReport = {
 };
 
 /**
- * Crawl homepage + pagine same-origin: estrae href/src e verifica 4xx/5xx/timeout.
+ * Crawl homepage + pagine same-origin: estrae href/src e verifica 4xx/5xx.
+ * Timeout / errori di rete NON contano come URL rotti (evita falsi positivi).
  */
 export async function checkBrokenLinks(
   siteUrl: string,
@@ -81,10 +82,16 @@ export async function checkBrokenLinks(
 
   const targets = [...linkMap.keys()].slice(0, MAX_LINKS_TO_CHECK);
   const broken: BrokenHit[] = [];
+  let unverifiable = 0;
 
   await mapPool(targets, CONCURRENCY, async (url) => {
     const result = await probeUrl(url);
     if (result.ok) return;
+    if (result.status == null) {
+      // Timeout / rete: non segnalare come "rotto"
+      unverifiable += 1;
+      return;
+    }
     broken.push({
       url,
       status: result.status,
@@ -97,6 +104,10 @@ export async function checkBrokenLinks(
   const status404 = broken.filter((b) => b.status === 404).length;
 
   if (broken.length === 0) {
+    const note =
+      unverifiable > 0
+        ? ` ${unverifiable} link non verificati per timeout/rete (ignorati).`
+        : "";
     return {
       pagesScanned: visitedPages.size,
       linksChecked: targets.length,
@@ -107,11 +118,12 @@ export async function checkBrokenLinks(
           type: "broken_link",
           severity: "info",
           title: "Nessun URL rotto rilevato",
-          description: `Controllati ${targets.length} link su ${visitedPages.size} pagine. Nessun 4xx/5xx.`,
+          description: `Controllati ${targets.length} link su ${visitedPages.size} pagine. Nessun 4xx/5xx.${note}`,
           evidence: {
             pagesScanned: visitedPages.size,
             linksChecked: targets.length,
             broken: 0,
+            unverifiable,
             items: [],
           },
           proposedPlan: {
@@ -141,11 +153,12 @@ export async function checkBrokenLinks(
         description:
           status404 > 0
             ? `${status404} con HTTP 404 su ${targets.length} link controllati (${visitedPages.size} pagine).`
-            : `${broken.length} URL non raggiungibili su ${targets.length} controllati.`,
+            : `${broken.length} URL con HTTP 4xx/5xx su ${targets.length} controllati.`,
         evidence: {
           pagesScanned: visitedPages.size,
           linksChecked: targets.length,
           broken: broken.length,
+          unverifiable,
           items: sample.map((b) => ({
             url: b.url,
             status: b.status,
@@ -218,69 +231,46 @@ function looksLikeHtmlPath(pathname: string): boolean {
 }
 
 async function fetchHtml(url: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        signal: AbortSignal.timeout(TIMEOUT_MS + attempt * 8_000),
+        headers: {
+          "User-Agent": UA,
+          Accept: "text/html,application/xhtml+xml,*/*",
+        },
+        cache: "no-store",
+      });
+      if (!res.ok) return null;
+      const ct = res.headers.get("content-type") ?? "";
+      if (ct && !/html|xml|text\//i.test(ct)) return null;
+      return (await res.text()).slice(0, 600_000);
+    } catch {
+      /* retry once su timeout */
+    }
+  }
+  return null;
+}
+
+async function fetchOnce(
+  url: string,
+  method: "HEAD" | "GET",
+  timeoutMs = TIMEOUT_MS,
+): Promise<{ ok: true; status: number } | { ok: false; status: number | null; error?: string }> {
   try {
     const res = await fetch(url, {
-      method: "GET",
+      method,
       redirect: "follow",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         "User-Agent": UA,
-        Accept: "text/html,application/xhtml+xml,*/*",
+        Accept: "text/html,application/xhtml+xml,application/json,*/*;q=0.8",
       },
       cache: "no-store",
     });
-    if (!res.ok) return null;
-    const ct = res.headers.get("content-type") ?? "";
-    if (ct && !/html|xml|text\//i.test(ct)) return null;
-    return (await res.text()).slice(0, 600_000);
-  } catch {
-    return null;
-  }
-}
-
-async function probeUrl(
-  url: string,
-): Promise<{ ok: boolean; status: number | null; error?: string }> {
-  try {
-    let res = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: { "User-Agent": UA },
-      cache: "no-store",
-    });
-
-    // Molti server bloccano HEAD → riprova GET
-    if (
-      res.status === 405 ||
-      res.status === 501 ||
-      res.status === 403 ||
-      res.status === 400
-    ) {
-      res = await fetch(url, {
-        method: "GET",
-        redirect: "follow",
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-        headers: { "User-Agent": UA },
-        cache: "no-store",
-      });
-    }
-
     if (res.status >= 400) {
-      // Ultimo tentativo GET se HEAD ha dato 404 sospetto
-      if (res.status === 404) {
-        const getRes = await fetch(url, {
-          method: "GET",
-          redirect: "follow",
-          signal: AbortSignal.timeout(TIMEOUT_MS),
-          headers: { "User-Agent": UA },
-          cache: "no-store",
-        });
-        if (getRes.status < 400) {
-          return { ok: true, status: getRes.status };
-        }
-        return { ok: false, status: getRes.status };
-      }
       return { ok: false, status: res.status };
     }
     return { ok: true, status: res.status };
@@ -291,6 +281,34 @@ async function probeUrl(
       error: err instanceof Error ? err.message : "timeout/network",
     };
   }
+}
+
+async function probeUrl(
+  url: string,
+): Promise<{ ok: boolean; status: number | null; error?: string }> {
+  // 1) HEAD veloce
+  const head = await fetchOnce(url, "HEAD");
+  if (head.ok) return head;
+
+  // 2) Sempre GET di conferma (molti WP/WAF rompono HEAD o lo fanno scadere)
+  const get = await fetchOnce(url, "GET");
+  if (get.ok) return get;
+
+  // 3) Un retry GET più paziente su errori di rete
+  if (get.status == null) {
+    const retry = await fetchOnce(url, "GET", TIMEOUT_MS + 8_000);
+    if (retry.ok) return retry;
+    return retry;
+  }
+
+  // HEAD 404 + GET 200 (già coperto) / HEAD 4xx con GET diverso
+  if (head.status != null && head.status !== get.status && get.status != null) {
+    return get.status < 400
+      ? { ok: true, status: get.status }
+      : { ok: false, status: get.status, error: get.error };
+  }
+
+  return get;
 }
 
 async function mapPool<T>(

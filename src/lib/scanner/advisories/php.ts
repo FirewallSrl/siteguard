@@ -250,6 +250,7 @@ export async function detectPhpFromSftp(
     { rel: "composer.lock", kind: "lock" },
     { rel: ".user.ini", kind: "ini" },
     { rel: "php.ini", kind: "ini" },
+    { rel: ".htaccess", kind: "ini" },
   ];
 
   for (const base of bases) {
@@ -265,9 +266,7 @@ export async function detectPhpFromSftp(
           if (v) return { version: v, source: "sftp" };
         }
         if (item.kind === "ini") {
-          const v =
-            text.match(/^\s*;\s*PHP\s+(\d+\.\d+(?:\.\d+)?)/im)?.[1] ??
-            text.match(/php[_-]?version\s*=\s*["']?(\d+\.\d+(?:\.\d+)?)/i)?.[1];
+          const v = parseIniOrHtaccessPhpVersion(text);
           if (v) return { version: v, source: "sftp" };
         }
         if (item.kind === "composer") {
@@ -302,6 +301,25 @@ export async function detectPhpFromSftp(
       }
     }
   }
+  return null;
+}
+
+function parseIniOrHtaccessPhpVersion(text: string): string | null {
+  const direct =
+    text.match(/^\s*;\s*PHP\s+(\d+\.\d+(?:\.\d+)?)/im)?.[1] ??
+    text.match(/php[_-]?version\s*=\s*["']?(\d+\.\d+(?:\.\d+)?)/i)?.[1];
+  if (direct) return direct;
+
+  const ea = text.match(
+    /(?:x-httpd-ea-php|x-httpd-php|alt-php|application\/x-httpd-php)[^\d]*(\d)(\d)/i,
+  );
+  if (ea) return `${ea[1]}.${ea[2]}`;
+
+  const dotted = text.match(
+    /(?:AddHandler|SetHandler|php_value)[^\n]*php[\/_-]?(\d)\.(\d+)/i,
+  );
+  if (dotted) return `${dotted[1]}.${dotted[2]}`;
+
   return null;
 }
 
